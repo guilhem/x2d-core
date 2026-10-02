@@ -2,7 +2,7 @@
 
 // X2D-compatible radio codec: 12-byte body, rolling word, biphase-mark chips.
 // Pure computation: no radio, USB, flash or counter state, and no dependency on
-// protocol.h. The caller owns identity, action byte and counter, and emits only
+// the serial protocol. The caller owns identity, action byte and counter, and emits only
 // what it has authorized from captures.
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -113,7 +113,7 @@ inline bool make_body(uint32_t identity, uint8_t action, uint16_t counter,
   return true;
 }
 
-// Shared shutter vocabulary for native adapters and the JSONL gateway.
+// Shared shutter vocabulary for the firmware adapters.
 // Reject unknown actions rather than silently turning them into STOP.
 inline bool make_command_body(uint32_t identity, Action action, uint16_t counter,
                               Body* out) {

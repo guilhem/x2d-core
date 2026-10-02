@@ -1,7 +1,7 @@
 #pragma once
 
 // Durable identity/counter journal for up to 16 shutters (shutter_id 1..16).
-// Independent of Home Assistant, USB, the radio and protocol.h. The firmware
+// Independent of Home Assistant, USB, the radio and the serial protocol. The firmware
 // is the only owner of rolling counters; the journal never resets or wraps one.
 //
 // Flash region: 64 KiB, relative offsets 0..65535, two banks of 32 KiB. Each
