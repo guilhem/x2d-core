@@ -21,15 +21,15 @@
 #define abs(x) ((x) > 0 ? (x) : -(x))
 #define round(x) ((x) >= 0 ? (long)((x) + 0.5) : (long)((x) - 0.5))
 
-#include "journal.h"
-#include "radio_codec.h"
+#include <x2d/journal.h>
+#include <x2d/radio_codec.h>
 
 // Codec, journal, queue and runtime are plain C++17, with no JSON dependency.
 #ifdef ARDUINOJSON_VERSION
 #error "radio/journal/runtime headers must not include ArduinoJson"
 #endif
 
-using namespace ha_x2d;
+using namespace x2d;
 
 #define CHECK(condition)                                                      \
   do {                                                                        \

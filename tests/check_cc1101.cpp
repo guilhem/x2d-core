@@ -5,10 +5,10 @@
 #include <algorithm>
 #include <array>
 #include <vector>
-#include "cc1101.h"
+#include <x2d/cc1101.h>
 
-using ha_x2d::cc1101::Driver;
-using ha_x2d::cc1101::Mode;
+using x2d::cc1101::Driver;
+using x2d::cc1101::Mode;
 
 struct Bus {
   std::array<uint8_t, 64> registers{};
@@ -213,7 +213,7 @@ int main() {
   {
     Bus bus;
     Driver<Bus, Mode::tx_check> chip(bus);
-    ha_x2d::cc1101::DigitalInput input;
+    x2d::cc1101::DigitalInput input;
     assert(chip.configure_digital_check(input));
     assert(Driver<Bus>::digital_input_valid(input));
     assert(!chip.configure_receiver(true, 868350000, 0));

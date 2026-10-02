@@ -4,15 +4,15 @@
 #include <string.h>
 #include <utility>
 #include <vector>
-#include "radio_runtime.h"
+#include <x2d/radio_runtime.h>
 
 // Codec, journal, queue and runtime are plain C++17, with no JSON dependency.
 #ifdef ARDUINOJSON_VERSION
 #error "radio/journal/runtime headers must not include ArduinoJson"
 #endif
 
-using namespace ha_x2d;
-using namespace ha_x2d::journal;
+using namespace x2d;
+using namespace x2d::journal;
 
 // Decode each scheduled segment independently, including stuffing and footer.
 static radio::Body decode_frame(const radio::Waveform& wave, size_t begin, size_t end) {

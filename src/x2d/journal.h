@@ -40,10 +40,10 @@
 #include <stdint.h>
 #include <string.h>
 
-namespace ha_x2d {
+namespace x2d {
 namespace journal {
 
-constexpr uint8_t SLOTS = 16;  // keep equal to ha_x2d::MAX_SHUTTERS
+constexpr uint8_t SLOTS = 16;  // keep equal to x2d::MAX_SHUTTERS
 constexpr uint32_t PAGE_BYTES = 256;
 constexpr uint32_t SECTOR_BYTES = 4096;
 constexpr uint32_t BANK_BYTES = 32768;
@@ -440,7 +440,7 @@ class Journal {
     return true;
   }
   // PRIVATE: trial admission can refuse a second enrollment even after
-  // reboot or a burnt/torn reservation. Never export this counter over USB.
+  // reboot or a burnt/torn reservation. Treat this counter as internal journal state.
   bool next_counter(uint8_t shutter_id, uint32_t* out) const {
     const detail::SlotRecord* s = slot(shutter_id);
     if (!s || !s->state || !out) return false;
@@ -661,4 +661,4 @@ class Journal {
 };
 
 }  // namespace journal
-}  // namespace ha_x2d
+}  // namespace x2d

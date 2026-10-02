@@ -41,13 +41,13 @@ jobs:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           cmake -S . -B build \
-            -DBUILD_TESTING=ON \
+            -DX2D_BUILD_TESTING=ON \
             -DCMAKE_CXX_STANDARD=17 \
             -DCMAKE_CXX_EXTENSIONS=OFF \
             -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
             -DCMAKE_CXX_FLAGS="$CXX_FLAGS" \
             -DX2D_RELEASE_TAG="$RELEASE_TAG"
-      - name: Build checks and MySensors server
+      - name: Build core checks
         run: cmake --build build --parallel 2
-      - name: Run checks
+      - name: Check core and external consumers
         run: ctest --test-dir build --output-on-failure --stop-on-failure --timeout 120
