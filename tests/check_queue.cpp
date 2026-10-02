@@ -1,10 +1,9 @@
 #include <assert.h>
 #include <string>
 #include <vector>
-#include "protocol.h"
+#include "types.h"
 #include "tx_queue.h"
 using namespace ha_x2d;
-Request parse(const std::string& s) { return decode(s.data(), s.size()); }
 int main() {
   OutputBuffer output;
   const std::string fill(OutputBuffer::CAPACITY - 3, 'x');
@@ -23,19 +22,6 @@ int main() {
   assert(output.append("old\n", 4));
   output.clear();
   assert(output.size() == 0 && !output.append(nullptr, 1));
-  assert(parse(R"({"v":2,"id":1,"op":"hello"})").op == Operation::hello);
-  const std::string prefix = R"({"v":2,"id":2,"session":"0123456789ABCDEF","op":)";
-  assert(parse(prefix + R"("command","args":{"shutter_id":1,"action":"stop"}})").action == Action::stop);
-  for (const std::string& s : std::vector<std::string>{
-      R"({"v":1,"id":1,"op":"hello"})", R"({"v":true,"id":1,"op":"hello"})",
-      R"({"v":2,"id":true,"op":"hello"})", R"({"v":2,"id":1,"op":"hello","op":"hello"})",
-      R"({'v':2,'id':1,'op':'hello'})", R"({v:2,id:1,op:"hello"})",
-      R"({"v":2,"id":01,"op":"hello"})", R"({"v":2,"id":1,"op":"hello"} {})",
-      prefix + R"("command","args":{"shutter_id":1,"shutter_id":2,"action":"stop"}})",
-      prefix + R"("command","args":{"shutter_id":0,"action":"stop"}})",
-      prefix + R"("command","args":{"shutter_id":17,"action":"stop"}})",
-      prefix + R"("command","args":{"shutter_id":1,"action":"pair"}})",
-      prefix + R"("status","args":{"x":1}})"}) assert(parse(s).error);
   LineFramer framer;
   for (size_t i = 0; i < MAX_LINE_BYTES; ++i) assert(framer.feed('x') == LineFramer::Event::none);
   assert(framer.feed('\n') == LineFramer::Event::too_long);

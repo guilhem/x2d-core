@@ -7,7 +7,6 @@ struct TxJob {
   uint8_t shutter_id = 0;
   Action action = Action::none;
   bool enrollment = false;
-  uint32_t connection_id = 0;  // completion belongs to the accepting USB connection
 };
 class TxQueue {
  public:
