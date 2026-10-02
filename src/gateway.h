@@ -52,6 +52,7 @@ static_assert(journal::SLOTS == MAX_SHUTTERS, "slot contract mismatch");
 //                                      gates; the hook never decides policy.
 //   bool authorize_provision(const journal::Journal&, uint8_t shutter_id);
 //   bool authorize_pair(const journal::Journal&, uint8_t shutter_id);
+//   bool authorize_confirm(const journal::Journal&, uint8_t shutter_id);
 //                                      supervised-trial gates (slot, expected
 //                                      counter). false -> profile_unverified.
 //   bool new_controller(const journal::Journal&, journal::NewController&);
@@ -332,7 +333,10 @@ class Gateway {
         result["accepted"] = true;
         result["shutter_id"] = request.shutter_id;
       } else if (request.op == Operation::confirm) {
-        if (!hooks_.enrollment_allowed()) { error(request, "profile_unverified", true); return; }
+        if (!hooks_.enrollment_allowed() ||
+            !hooks_.authorize_confirm(journal_, request.shutter_id)) {
+          error(request, "profile_unverified", true); return;
+        }
         if (busy()) { error(request, "maintenance_pending", true); return; }
         const auto status = journal_.confirm(request.shutter_id);
         if (status != journal::Status::ok) {

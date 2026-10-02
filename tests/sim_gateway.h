@@ -144,6 +144,9 @@ struct Hooks {
   bool authorize_provision(const journal::Journal&, uint8_t shutter_id) {
     return shutter_id == trial_slot;
   }
+  bool authorize_confirm(const journal::Journal&, uint8_t shutter_id) {
+    return shutter_id == trial_slot;
+  }
   bool authorize_pair(const journal::Journal& journal, uint8_t shutter_id) {
     uint32_t next;
     return shutter_id == trial_slot && journal.next_counter(shutter_id, &next) &&
