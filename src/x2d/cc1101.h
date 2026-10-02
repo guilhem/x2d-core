@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-namespace ha_x2d::cc1101 {
+namespace x2d::cc1101 {
 
 enum class Mode { gateway, rx_debug, tx_check };
 struct Identity {
@@ -253,4 +253,4 @@ class Driver {
   bool configured_ = false, data_owned_ = false, tx_active_ = false, idle_verified_ = false;
 };
 
-}  // namespace ha_x2d::cc1101
+}  // namespace x2d::cc1101

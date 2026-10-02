@@ -1,0 +1,4 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/x2d-core-targets.cmake")
+check_required_components(x2d-core)

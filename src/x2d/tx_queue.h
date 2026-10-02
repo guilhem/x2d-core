@@ -1,7 +1,10 @@
 #pragma once
-#include "types.h"
+#include <stddef.h>
+#include <stdint.h>
 
-namespace ha_x2d {
+#include <x2d/types.h>
+
+namespace x2d {
 struct TxJob {
   uint32_t request_id = 0, deadline_ms = 0;
   uint8_t shutter_id = 0;
@@ -68,4 +71,4 @@ class TxQueue {
   TxJob jobs_[CAPACITY]{};
   size_t size_ = 0;
 };
-}  // namespace ha_x2d
+}  // namespace x2d
