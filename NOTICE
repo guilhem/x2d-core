@@ -1,0 +1,14 @@
+X2D Core
+Copyright 2026 Guilhem
+
+Extracted from https://github.com/guilhem/ha-x2d at
+a0f98d088e037467e4dbd348521ebb2bc6fe71f1.
+
+The rolling transform in src/radio_codec.h is adapted from
+x3d_enc_msg_id / x3d_dec_msg_id:
+Copyright (c) 2023 Sven Fabricius
+https://github.com/mr-sven/x3d-rfm-esp32/blob/92d9927462b93a2574986aa9e5c5b63dc5997ef4/x3d-lib/x3d.c
+Licensed under Apache-2.0. Modifications: C++ translation of the Python public
+sample verification, explicit caller-owned counters and bounded waveforms.
+The original attribution remains in the header; historical research/ paths
+refer to the source ha-x2d repository. The license text is in LICENSE here.
