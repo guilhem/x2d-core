@@ -730,7 +730,7 @@ static void check_pair_deadlines_and_profiles() {
 static void check_pair_reservation_cuts_and_faults() {
   // Second reservation: before body, intact torn body, before/during commit.
   // The first counter is always burnt; the second burns iff its body is intact.
-  for (const auto cut : {std::pair<unsigned, unsigned>{2, 0}, {2, PAGE_BYTES},
+  for (const auto &cut : {std::pair<unsigned, unsigned>{2, 0}, {2, PAGE_BYTES},
                          {3, 0}, {3, PAGE_BYTES / 2}}) {
     Fixture f(true, 0);
     f.runtime.set_enabled(true, true);
