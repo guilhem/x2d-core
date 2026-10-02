@@ -118,6 +118,31 @@ static void parser_and_discovery() {
   assert(!rig.radio.starts);
 }
 
+static void diagnostics() {
+  journal::MemoryFlash flash;
+  Rig rig(flash);
+  rig.drain();
+  const struct { const char *message; uint8_t slot; const char *expected; } cases[] = {
+    {"association_profile_unqualified", 1, "1:pair_unqualified"},
+    {"association_counter_mismatch", 1, "1:pair_counter_mismatch"},
+    {"multiple_pending_associations", 0, "multiple_pending"},
+    {"identity_generation_failed", 1, "1:identity_failed"},
+    {"transmission_disabled", 0, "tx_off,pos_unknown"},
+    {"radio_unavailable", 0, "radio_off,pos_unknown"},
+    {"ready", 0, "ready,pos_unknown"},
+    {"association_pending", 0, "pair_pending,pos_unknown"},
+    {"paired", 16, "16:paired,pos_unknown"},
+    {"storage_io_error", 1, "1:storage_io_error"},
+    {"storage_corrupt", 0, "storage_corrupt"},
+    {"ready_extra", 0, "ready_extra"},
+  };
+  for (const auto &test : cases) {
+    rig.gateway.status(test.message, test.slot);
+    assert(rig.drain() == std::string("1;19;1;0;24;") + test.expected + "\n");
+    assert(!rig.gateway.failed());
+  }
+}
+
 static void commands_stop_and_reconnect() {
   journal::MemoryFlash flash;
   paired(flash);
@@ -224,6 +249,7 @@ static void slow_host() {
 
 int main() {
   parser_and_discovery();
+  diagnostics();
   commands_stop_and_reconnect();
   pairing_power_loss_and_corruption();
   slow_host();

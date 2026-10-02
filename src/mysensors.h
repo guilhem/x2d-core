@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdio.h>
+#include <string_view>
 #include "controller.h"
 
 // MySensors 2.x serial API, one USB gateway and one fixed virtual node.
@@ -107,24 +108,26 @@ template<class Radio, class Policy> class Gateway {
   void status(const char *message, uint8_t slot) {
     // Keep the public diagnostic inside the standard 25-byte payload. These
     // names retain the cause without exposing radio identities or counters.
-    if (!strcmp(message, "association_profile_unqualified")) message = "pair_unqualified";
-    else if (!strcmp(message, "association_counter_mismatch")) message = "pair_counter_mismatch";
-    else if (!strcmp(message, "multiple_pending_associations")) message = "multiple_pending";
-    else if (!strcmp(message, "identity_generation_failed")) message = "identity_failed";
-    else if (!strcmp(message, "transmission_disabled")) message = "tx_off,pos_unknown";
-    else if (!strcmp(message, "radio_unavailable")) message = "radio_off,pos_unknown";
-    else if (!strcmp(message, "ready")) message = "ready,pos_unknown";
-    else if (!strcmp(message, "association_pending")) message = "pair_pending,pos_unknown";
-    else if (!strcmp(message, "paired")) message = "paired,pos_unknown";
+    const std::string_view diagnostic(message);
+    if (diagnostic == "association_profile_unqualified") message = "pair_unqualified";
+    else if (diagnostic == "association_counter_mismatch") message = "pair_counter_mismatch";
+    else if (diagnostic == "multiple_pending_associations") message = "multiple_pending";
+    else if (diagnostic == "identity_generation_failed") message = "identity_failed";
+    else if (diagnostic == "transmission_disabled") message = "tx_off,pos_unknown";
+    else if (diagnostic == "radio_unavailable") message = "radio_off,pos_unknown";
+    else if (diagnostic == "ready") message = "ready,pos_unknown";
+    else if (diagnostic == "association_pending") message = "pair_pending,pos_unknown";
+    else if (diagnostic == "paired") message = "paired,pos_unknown";
     char unknown[PAYLOAD_BYTES + 1];
     if (terminal_unknown_) {
-      if (!strcmp(message, "emitted")) message = "pos_unknown";
+      const std::string_view terminal(message);
+      if (terminal == "emitted") message = "pos_unknown";
       else {
-        const char *cause = !strcmp(message, "radio_fault") ? "rf_fault" :
-                            !strcmp(message, "incomplete_burst") ? "incomplete" :
-                            !strcmp(message, "stop_preempted") ? "preempted" :
-                            !strcmp(message, "session_disconnected") ? "usb_lost" :
-                            !strcmp(message, "queue_cancelled") ? "cancelled" : "expired";
+        const char *cause = terminal == "radio_fault" ? "rf_fault" :
+                            terminal == "incomplete_burst" ? "incomplete" :
+                            terminal == "stop_preempted" ? "preempted" :
+                            terminal == "session_disconnected" ? "usb_lost" :
+                            terminal == "queue_cancelled" ? "cancelled" : "expired";
         snprintf(unknown, sizeof(unknown), "%s,pos_unknown", cause);
         message = unknown;
       }

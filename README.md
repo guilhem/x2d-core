@@ -34,4 +34,21 @@ shared controller, serial framing, echoes and pairing recovery.
 stdin/stdout with simulated flash/radio for ha-x2d's native HA/pymysensors PTY
 checks. These establish software behavior, not RF or motor qualification.
 
+GitHub Actions runs these checks on pull requests and pushes to `main`, using
+GCC in Release mode and Clang with AddressSanitizer and UndefinedBehaviorSanitizer.
+Assertions remain active in Release mode. Firmware builds and Home Assistant
+integration checks run in the consumer repositories.
+
+## Releases
+
+`library.properties` is the single source of the library version; CMake reads it
+and requires `X.Y.Z` without leading zeros. Update this version and merge with
+passing CI before creating a matching `vX.Y.Z` tag and publishing its GitHub
+release. Both a tag push and release publication rerun the checks on the tagged
+commit. A release created directly is checked after publication.
+
+To check a proposed tag locally, configure with `-DX2D_RELEASE_TAG=v0.1.0`,
+using the intended version. A mismatched tag fails configuration. GitHub's
+source ZIP and tar.gz archives contain the complete header-only library.
+
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE] for transform attribution.
