@@ -32,6 +32,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "types.h"
+
 namespace ha_x2d {
 namespace radio {
 
@@ -109,6 +111,20 @@ inline bool make_body(uint32_t identity, uint8_t action, uint16_t counter,
   b[10] = static_cast<uint8_t>(checksum >> 8);
   b[11] = static_cast<uint8_t>(checksum);
   return true;
+}
+
+// Shared shutter vocabulary for native adapters and the JSONL gateway.
+// Reject unknown actions rather than silently turning them into STOP.
+inline bool make_command_body(uint32_t identity, Action action, uint16_t counter,
+                              Body* out) {
+  uint8_t wire_action;
+  switch (action) {
+    case Action::open: wire_action = 0x81; break;
+    case Action::close: wire_action = 0x82; break;
+    case Action::stop: wire_action = 0x04; break;
+    default: return false;
+  }
+  return make_body(identity, wire_action, counter, out);
 }
 
 // Genuine B simultaneous UP+DOWN in N, two distinct command bodies with
