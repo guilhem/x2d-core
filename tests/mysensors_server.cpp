@@ -226,14 +226,6 @@ struct Policy {
   const char* firmware() { return "x2d-core-mysensors-sim"; }
 };
 
-// failed is a method in the JSONL gateway; accept a plain member as well.
-template <class G>
-auto failed_of(const G& gateway, int) -> decltype(static_cast<bool>(gateway.failed())) {
-  return gateway.failed();
-}
-template <class G>
-bool failed_of(const G& gateway, long) { return gateway.failed; }
-
 struct Options {
   int control = -1;
   uint32_t burst_ms = 80, paired = journal::SLOTS, seed = 1;
@@ -370,7 +362,7 @@ int main(int argc, char** argv) {
     pollfd fds[2];
     nfds_t count = 0;
     int in_slot = -1, control_slot = -1;
-    if (!eof && !failed_of(gateway, 0) && rx_pos == rx_used) {
+    if (!eof && !gateway.failed() && rx_pos == rx_used) {
       in_slot = static_cast<int>(count);
       fds[count++] = {0, POLLIN, 0};
     }
@@ -426,7 +418,7 @@ int main(int argc, char** argv) {
     else if (rx_pos < rx_used) rx_pos += gateway.feed(rx + rx_pos, rx_used - rx_pos);
     gateway.tick(clock);  // after feed(): the reply is queued before any completion event
     if (!flush()) return 1;
-    if (failed_of(gateway, 0) && !failure_reported) {
+    if (gateway.failed() && !failure_reported) {
       failure_reported = true;
       reply(options.control, 'F');
     }

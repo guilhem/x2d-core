@@ -6,7 +6,7 @@
 #include <vector>
 #include "radio_runtime.h"
 
-// Codec, journal, queue and runtime are plain C++17: ArduinoJson belongs to the gateway only.
+// Codec, journal, queue and runtime are plain C++17, with no JSON dependency.
 #ifdef ARDUINOJSON_VERSION
 #error "radio/journal/runtime headers must not include ArduinoJson"
 #endif
