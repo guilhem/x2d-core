@@ -1,5 +1,21 @@
 cmake_minimum_required(VERSION 3.16)
-project(x2d_core VERSION 0.1.0 LANGUAGES CXX)
+
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/library.properties" X2D_VERSION_LINES REGEX "^version=")
+list(LENGTH X2D_VERSION_LINES X2D_VERSION_COUNT)
+if(NOT X2D_VERSION_COUNT EQUAL 1)
+  message(FATAL_ERROR "library.properties must contain exactly one version= entry")
+endif()
+string(REGEX REPLACE "^version=" "" X2D_CORE_VERSION "${X2D_VERSION_LINES}")
+if(NOT X2D_CORE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+  message(FATAL_ERROR "library.properties version must be X.Y.Z without leading zeros")
+endif()
+
+set(X2D_RELEASE_TAG "" CACHE STRING "Optional release tag to validate against the library version")
+if(NOT X2D_RELEASE_TAG STREQUAL "" AND NOT X2D_RELEASE_TAG STREQUAL "v${X2D_CORE_VERSION}")
+  message(FATAL_ERROR "Release tag must be v${X2D_CORE_VERSION}, got '${X2D_RELEASE_TAG}'")
+endif()
+
+project(x2d_core VERSION "${X2D_CORE_VERSION}" LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)

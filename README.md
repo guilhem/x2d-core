@@ -169,8 +169,22 @@ power cuts/corruption, counter exhaustion, queue/STOP behavior, runtime faults,
 supervised association and simulated CC1101 SPI/GPIO. A small external consumer
 runs the same source against both `add_subdirectory` and a relocated installed
 package, compiles every public header alone, checks inherited C++17, and checks
-that parent tests remain untouched. Independent CI runs these checks with GCC
-and Clang. Native checks establish software behavior; RF/motor/flash hardware
+that parent tests remain untouched. GitHub Actions runs these checks on pull
+requests and pushes to `main`, using GCC in Release mode and Clang in Debug mode
+with AddressSanitizer and UndefinedBehaviorSanitizer. Assertions remain active in
+Release mode. Native checks establish software behavior; RF/motor/flash hardware
 and embedded toolchains require separate validation.
+
+## Releases
+
+`library.properties` is the single source of the library version; CMake reads it
+and requires `X.Y.Z` without leading zeros. Update this version and merge with
+passing CI before creating a matching `vX.Y.Z` tag and publishing its GitHub
+release. Both a tag push and release publication rerun the checks on the tagged
+commit. A release created directly is checked after publication.
+
+To check a proposed tag locally, configure with `-DX2D_RELEASE_TAG=v0.1.0`,
+using the intended version. A mismatched tag fails configuration. GitHub's
+source ZIP and tar.gz archives contain the complete header-only library.
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for transform attribution.
