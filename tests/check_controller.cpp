@@ -1,10 +1,11 @@
-#include "controller.h"
+#include <x2d/controller.h>
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
-using namespace ha_x2d;
+using namespace x2d;
 
 struct Radio {
   bool healthy = true, running = false, stop = false, fail = false;

@@ -1,6 +1,6 @@
 # Observed X2D radio format
 
-This is the format implemented by `src/radio_codec.h`, derived from public
+This is the format implemented by `src/x2d/radio_codec.h`, derived from public
 vectors and captures. It does not qualify a new motor, radio board or enrollment
 identity. The firmware supplies and authorizes each identity, action and counter.
 
@@ -31,11 +31,10 @@ The scheduler reserves both counters before any RF and starts the second burst
 2001 ms after the first start, within a 6 s active deadline. Enrollment requires
 an explicit firmware authorization and a motor window opened by the user.
 
-The shared gateway maps open/close/STOP to `81`/`82`/`04` and builds the
+The controller maps open/close/STOP to `81`/`82`/`04` and builds the
 canonical command and enrollment bodies. Firmware supplies authorization, copy
 counts and calibrated chip duration in nanoseconds. The lower-level portable
 scheduler also accepts a caller-supplied body builder.
-The RP2040 adapter retains its 208500 ns calibration and existing PIO program.
 
 The journal reserves counter 65535 and the last 16 records of its active bank
 for STOP. A reservation is durable before RF, and is never rolled back after

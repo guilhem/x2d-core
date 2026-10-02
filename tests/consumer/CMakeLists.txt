@@ -1,0 +1,40 @@
+cmake_minimum_required(VERSION 3.16)
+project(x2d_consumer LANGUAGES CXX)
+
+# Linking x2d::core must raise this to C++17 without setting global flags.
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(BUILD_TESTING)
+  enable_testing()
+  add_test(NAME parent_test COMMAND ${CMAKE_COMMAND} -E true)
+endif()
+
+if(CORE_SOURCE)
+  add_subdirectory("${CORE_SOURCE}" core)
+  if(X2D_BUILD_TESTING)
+    message(FATAL_ERROR "Core tests defaulted on in a dependency")
+  endif()
+else()
+  find_package(x2d-core 0.1 CONFIG REQUIRED)
+endif()
+
+get_target_property(options x2d::core INTERFACE_COMPILE_OPTIONS)
+if(options)
+  message(FATAL_ERROR "Core imposes consumer compile options: ${options}")
+endif()
+if(NOT CMAKE_CXX_STANDARD EQUAL 11)
+  message(FATAL_ERROR "Core changed the consumer's global C++ standard")
+endif()
+if(TARGET check_radio OR DEFINED CACHE{DART_TESTING_TIMEOUT})
+  message(FATAL_ERROR "Core added test targets or global CTest configuration")
+endif()
+
+add_executable(consumer main.cpp)
+target_link_libraries(consumer PRIVATE x2d::core)
+
+# Every public header must compile as the first and only include.
+foreach(header IN ITEMS types radio_codec journal tx_queue radio_runtime controller cc1101)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${header}.cpp" "#include <x2d/${header}.h>\n")
+  add_library(header_${header} OBJECT "${CMAKE_CURRENT_BINARY_DIR}/${header}.cpp")
+  target_link_libraries(header_${header} PRIVATE x2d::core)
+endforeach()

@@ -4,9 +4,13 @@
 // journal and RadioRuntime. One loop owner; no I/O, session or restart policy:
 // adapters decide what a confirmed association, pause or disconnect means.
 
-#include "radio_runtime.h"
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 
-namespace ha_x2d {
+#include <x2d/radio_runtime.h>
+
+namespace x2d {
 
 // This is a build-time, supervised trial authorization, not a qualified motor
 // profile. An ordinary build has no authorization to generate RF identities.
@@ -190,4 +194,4 @@ template<class Radio, class Observer> class Controller {
   bool transmit_ = false, enrollment_ = false, valid_ = false, paused_ = false;
 };
 
-}  // namespace ha_x2d
+}  // namespace x2d

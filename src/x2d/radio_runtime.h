@@ -1,10 +1,14 @@
 #pragma once
 
-#include "journal.h"
-#include "radio_codec.h"
-#include "tx_queue.h"
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 
-namespace ha_x2d {
+#include <x2d/journal.h>
+#include <x2d/radio_codec.h>
+#include <x2d/tx_queue.h>
+
+namespace x2d {
 namespace radio {
 
 struct TxProfile {
@@ -23,7 +27,7 @@ struct TxEvent {
   journal::Status storage_status = journal::Status::ok;
 };
 
-// Single owner, called from the radio loop, never from an ISR/USB lock.
+// Single owner, called from the radio loop, never from an ISR/transport lock.
 // Radio (nonblocking):
 //   bool start_burst(const Waveform&, uint32_t chip_ns, uint32_t& started_ms):
 //     all copies continuously, radio start observation returned as millis.
@@ -44,7 +48,7 @@ struct TxEvent {
 //     phase 0 for normal commands, phases 0/1 for genuine B enrollment; dispatch to
 //     caller's action/enrollment builder. No action bytes or enrollment format
 //     are invented here. BOTH enrollment reservations and waveforms precede RF.
-//   void report(const TxEvent&): record/enqueue promptly; never wait for USB.
+//   void report(const TxEvent&): record/enqueue promptly; never wait for a transport.
 // Hooks must not reenter the runtime. Terminal events occur once per request;
 // Non-emitted outcomes can include completed copies (no RF rollback).
 // Idle maintenance failures use request_id 0 as a storage-level event.
@@ -269,4 +273,4 @@ class RadioRuntime {
 };
 
 }  // namespace radio
-}  // namespace ha_x2d
+}  // namespace x2d

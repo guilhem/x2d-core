@@ -32,9 +32,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "types.h"
+#include <x2d/types.h>
 
-namespace ha_x2d {
+namespace x2d {
 namespace radio {
 
 constexpr size_t BODY_BYTES = 12;
@@ -283,4 +283,4 @@ inline size_t to_pulses(const Waveform& wave, uint8_t* out, size_t capacity) {
 }
 
 }  // namespace radio
-}  // namespace ha_x2d
+}  // namespace x2d
