@@ -193,7 +193,11 @@ class RadioRuntime {
     completed_ = 0;
     phase_ = 0;
     cancel_outcome_ = cancel_error_ = nullptr;
-    if (current_.enrollment) current_.deadline_ms = now + ENROLLMENT_ACTIVE_MS;
+    // Queue expiry limits waiting, never the duration left for an admitted
+    // burst. Retain a separate watchdog, including calibrated chip durations.
+    const uint32_t burst_ms = static_cast<uint32_t>(
+        (uint64_t{waves_[0].chips()} * profile_.chip_ns + 999999) / 1000000);
+    current_.deadline_ms = now + (current_.enrollment ? ENROLLMENT_ACTIVE_MS : burst_ms + 1000);
     active_ = true;
     start_burst(now);
   }

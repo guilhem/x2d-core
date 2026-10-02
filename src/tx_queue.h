@@ -11,7 +11,8 @@ struct TxJob {
 class TxQueue {
  public:
   static constexpr size_t CAPACITY = 16;
-  static constexpr uint32_t TTL_MS = 3000;
+  // A group command can wait behind all 16 nominal ~1.3-second bursts.
+  static constexpr uint32_t TTL_MS = 30000;
   template<class Report> bool push(TxJob job, uint32_t now, Report report) {
     expire(now, report);
     if (job.action == Action::stop) {

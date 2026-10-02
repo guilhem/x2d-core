@@ -62,7 +62,7 @@ template<class Radio, class Observer> class Controller {
   bool command(uint8_t slot, Action action, uint32_t now) {
     if (!admit()) return false;
     if (!transmit_ || !radio_.available()) return refuse("transmission_disabled", slot);
-    return runtime_.submit(job(slot, action, false, now), now);
+    return runtime_.submit(job(slot, action, false), now);
   }
 
   bool associate(uint32_t now) {
@@ -94,7 +94,7 @@ template<class Radio, class Observer> class Controller {
     uint32_t next;
     if (!journal_.next_counter(slot, &next) || next != authorization_.expected_next_counter)
       return refuse("association_counter_mismatch", slot);
-    if (!runtime_.submit(job(slot, Action::none, true, now), now)) return false;
+    if (!runtime_.submit(job(slot, Action::none, true), now)) return false;
     status("associating", slot);
     return true;
   }
@@ -171,14 +171,13 @@ template<class Radio, class Observer> class Controller {
     if (result == journal::Status::corrupt || result == journal::Status::io_error) valid_ = false;
     return refuse(journal::protocol_error(result), slot);
   }
-  TxJob job(uint8_t slot, Action action, bool enrollment, uint32_t now) {
+  TxJob job(uint8_t slot, Action action, bool enrollment) {
     if (!++request_id_) ++request_id_;
     TxJob result{};
     result.request_id = request_id_;
     result.shutter_id = slot;
     result.action = action;
     result.enrollment = enrollment;
-    result.deadline_ms = now + 3000;
     return result;
   }
   journal::Journal &journal_;
