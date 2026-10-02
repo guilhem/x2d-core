@@ -102,6 +102,18 @@ static Decoded decode_burst(const radio::Waveform& wave) {
 
 static void check_codec() {
   using namespace radio;
+  for (const auto action : {Action::open, Action::close, Action::stop}) {
+    Body body;
+    ParsedBody parsed;
+    const uint8_t expected = action == Action::open ? 0x81 : action == Action::close ? 0x82 : 0x04;
+    CHECK(make_command_body(0x123456, action, 123, &body));
+    CHECK(parse_body(body.bytes, body.length, &parsed));
+    CHECK(parsed.identity == 0x123456 && parsed.counter == 123 && parsed.action == expected);
+  }
+  Body invalid;
+  CHECK(!make_command_body(1, Action::none, 0, &invalid));
+  CHECK(!make_command_body(1, static_cast<Action>(255), 0, &invalid));
+  CHECK(!make_command_body(1, Action::open, 0, nullptr));
   // Public HACF export (identity F73192, counters 6641-6644) and public X3D
   // frames from diorcety/X2D raw_x3d.bin; Python reference transform.
   const struct { uint32_t id; uint16_t counter, word; } vectors[] = {

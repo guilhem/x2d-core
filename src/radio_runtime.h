@@ -19,20 +19,24 @@ struct TxEvent {
   TxJob job;
   const char* outcome;  // emitted, cancelled, expired, rejected, unknown
   const char* error = nullptr;
-  uint8_t completed_copies = 0;  // whole copies, summed across stages (at most 64)
+  uint8_t completed_copies = 0;  // verified whole copies; lower bound on radio faults
   journal::Status storage_status = journal::Status::ok;
 };
 
 // Single owner, called from the radio loop, never from an ISR/USB lock.
 // Radio (nonblocking):
 //   bool start_burst(const Waveform&, uint32_t chip_ns, uint32_t& started_ms):
-//     all copies continuously, actual SM start observation returned as millis.
+//     all copies continuously, radio start observation returned as millis.
 //     The waveform remains alive/unchanged until end_burst(). False guarantees
 //     no chip was sent and no end_burst() is needed.
 //   FrameState poll_burst(uint8_t& completed_copies): absolute whole-copy count
-//     for the current burst, also on busy/unknown. Complete means the last
+//     for the current burst; a verified lower bound is allowed on busy/unknown.
+//     Complete requires an exact count. Complete means the last
 //     counted frame's final chip lasted fully AND the output is safely parked.
-//   void request_stop(): park after the next full frame, never a partial copy.
+//   void request_stop(): park at a full frame boundary, never a partial copy.
+//     Prefetching backends stop at the first boundary not yet committed to the
+//     peripheral. Each backend must document its prefetch/latency limit and
+//     return unknown after a detected underrun or timing fault, not complete.
 //   void end_burst(): carrier off/release waveform, only after complete/fault.
 // Hooks:
 //   bool profile(const TxJob&, TxProfile&): only return qualified profiles.
@@ -103,7 +107,7 @@ class RadioRuntime {
   }
 
   // Session loss/clear: drop pending requests and stop the active burst at
-  // its next full frame. Never undo reservations, and never resume old work.
+  // its next cancellable full frame. Never undo reservations or resume old work.
   void disconnect() {
     queue_.clear(queue_report());
     if (active_) cancel("cancelled", "session_disconnected");

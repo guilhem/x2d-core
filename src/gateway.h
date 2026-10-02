@@ -76,9 +76,7 @@ class Gateway {
                radio::Body& body) {
       if (job.enrollment)
         return radio::make_enrollment_body(reserved.identity, reserved.counter, phase, &body);
-      const uint8_t action = job.action == Action::open ? 0x81
-                           : job.action == Action::close ? 0x82 : 0x04;
-      return radio::make_body(reserved.identity, action, reserved.counter, &body);
+      return radio::make_command_body(reserved.identity, job.action, reserved.counter, &body);
     }
     void report(const radio::TxEvent& event) { owner->on_event(event); }
   };
