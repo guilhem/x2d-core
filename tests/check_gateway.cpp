@@ -463,6 +463,35 @@ static void policy_gates_are_dynamic_and_default_closed() {
   CHECK(flash.mutations() == mutations && r->radio.started == 1);
 }
 
+static void confirmation_requires_slot_authorization() {
+  journal::MemoryFlash flash;
+  journal::Journal seed(flash);
+  CHECK(seed.open() == journal::StorageState::empty);
+  CHECK(seed.provision(1, {0x1234AB, 0, sim::GENERATION}) == journal::Status::ok);
+  CHECK(seed.provision(7, {0x9876CD, 100, sim::GENERATION}) == journal::Status::ok);
+  auto r = make(flash, sim::SESSION, false, true, true);
+  const std::vector<uint8_t> before(flash.raw(), flash.raw() + journal::REGION_BYTES);
+  const uint32_t mutations = flash.mutations();
+  r->send(hello(1));
+  r->take();
+  r->send(slot_op(2, "pair", 7));
+  CHECK_EQ(r->one(), fail(2, "profile_unverified"));
+  r->send(slot_op(3, "confirm", 7));
+  CHECK_EQ(r->one(), fail(3, "profile_unverified"));
+  r->send(slot_op(3, "confirm", 7));  // a duplicate rejection must stay inert
+  CHECK_EQ(r->one(), fail(3, "profile_unverified"));
+  r->send(command(4, 7, "open"));
+  CHECK_EQ(r->one(), fail(4, "not_paired"));
+  CHECK(r->journal.shutter(7).state == journal::SlotState::pending);
+  CHECK(r->next(7) == 100 && r->radio.started == 0);
+  CHECK(!memcmp(before.data(), flash.raw(), before.size()));
+  CHECK(flash.mutations() == mutations);
+  r->send(slot_op(5, "confirm", 1));
+  CHECK(r->one().find(R"("state":"paired")") != std::string::npos);
+  CHECK(r->journal.shutter(1).state == journal::SlotState::paired);
+  CHECK(r->next(1) == 0 && r->radio.started == 0);
+}
+
 static void supervised_trial_enrollment() {
   journal::MemoryFlash flash;
   auto r = make(flash, sim::SESSION, false, true, true);
@@ -598,6 +627,7 @@ int main() {
   disconnect_keeps_runtime_and_never_replays();
   output_overflow_fails_closed();
   policy_gates_are_dynamic_and_default_closed();
+  confirmation_requires_slot_authorization();
   supervised_trial_enrollment();
   reboot_keeps_counters_and_never_replays();
   corrupt_storage_is_never_formatted();
