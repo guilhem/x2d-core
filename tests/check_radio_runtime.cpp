@@ -655,13 +655,13 @@ static void check_pair_stop_dispatch() {
 }
 
 static void check_pair_deadlines_and_profiles() {
-  // Queue TTL stays 3000 ms, but a pair admitted just before its queue expiry
-  // gets a fresh active 6000 ms deadline, including uint32_t clock rollover.
+  // A pair admitted just before its queue expiry gets a fresh active 6000 ms
+  // deadline, including uint32_t clock rollover.
   const uint32_t start = 0xfffffff0u;
   Fixture f(true, 0);
   f.runtime.set_enabled(true, true);
-  assert(f.submit(1, 1, Action::none, start - 2999, true));
-  assert(f.submit(2, 2, Action::close, start - 2999));
+  assert(f.submit(1, 1, Action::none, start - TxQueue::TTL_MS + 1, true));
+  assert(f.submit(2, 2, Action::close, start - TxQueue::TTL_MS + 1));
   f.tick(start);
   f.tick(start + 1);
   assert(!strcmp(f.hooks.event(2).outcome, "expired"));
@@ -680,7 +680,7 @@ static void check_pair_deadlines_and_profiles() {
   Fixture queued;
   queued.runtime.set_enabled(true, true);
   assert(queued.submit(1, 1, Action::none, 10, true));
-  queued.tick(3010);
+  queued.tick(10 + TxQueue::TTL_MS);
   assert(!strcmp(queued.hooks.event(1).outcome, "expired"));
   assert(queued.hooks.reservations.empty() && queued.radio.bursts.empty());
 
@@ -725,6 +725,35 @@ static void check_pair_deadlines_and_profiles() {
     assert(!strcmp(overlap.hooks.event(1).error, "enrollment_overlap"));
     assert(overlap.radio.bursts.empty() && next_counter(overlap.journal) == 2);
   }
+}
+
+static void check_movement_gets_its_full_burst_after_queueing() {
+  const uint32_t start = 0xfffffff0u;
+  Fixture f;
+  f.hooks.copies = 25;
+  f.hooks.chip_ns = 1000000;  // the largest supported calibration
+  assert(f.submit(1, 1, Action::close, start - TxQueue::TTL_MS + 1));
+  f.tick(start);
+  const uint32_t duration_ms = f.radio.wave->chips();
+  for (uint32_t copy = 1; copy <= f.hooks.copies; ++copy) {
+    f.radio.done = true;
+    f.tick(start + duration_ms * copy / f.hooks.copies);
+  }
+  assert(!f.runtime.active() && !f.radio.stops);
+  assert(!strcmp(f.hooks.event(1).outcome, "emitted"));
+  assert(f.hooks.event(1).completed_copies == f.hooks.copies);
+
+  // A stuck backend still receives a bounded, frame-safe cancellation.
+  assert(f.submit(2, 1, Action::open, 10000));
+  f.tick(10000);
+  const uint32_t watchdog = 10000 + f.radio.wave->chips() + 1000;
+  f.tick(watchdog - 1);
+  assert(!f.radio.stop_requested);
+  f.tick(watchdog);
+  assert(f.radio.stop_requested);
+  f.radio.done = true;
+  f.tick(watchdog + 1);
+  assert(!strcmp(f.hooks.event(2).outcome, "expired"));
 }
 
 static void check_pair_reservation_cuts_and_faults() {
@@ -803,6 +832,7 @@ int main() {
   check_pair_cancellation();
   check_pair_stop_dispatch();
   check_pair_deadlines_and_profiles();
+  check_movement_gets_its_full_burst_after_queueing();
   check_pair_reservation_cuts_and_faults();
   puts("OK radio_runtime: durable counters, complete-frame STOP, expiry, disconnect, gates, faults, two-stage B enrollment");
 }

@@ -45,6 +45,13 @@ observation. RP2040 presents immediately; ESPHome owns its own restart policy.
 Corrupt flash blocks RF and is never reformatted. The MySensors serial adapter
 still publishes its diagnostic without deleting previously known HA children.
 
+The radio queue holds 16 requests with a 30-second waiting limit, enough for
+a group command at nominal chip timing. Active bursts get their full encoded
+duration plus a one-second watchdog margin; enrollment retains its six-second
+two-phase watchdog. STOP still preempts at a frame boundary. Extremely slow
+calibration or a stalled backend can exhaust the queue's waiting limit and
+report `queue_expired`; expired commands never reserve a counter or transmit.
+
 MySensors does not carry the journal generation. Never reuse a slot; before a
 full flash reset, explicitly remove HA's corresponding device and persisted
 MySensors node while the integration is stopped. Never restore an old sensor
