@@ -6,7 +6,6 @@
 #include <vector>
 
 using namespace x2d;
-
 struct Radio {
   bool healthy = true, running = false, stop = false, fail = false;
   uint32_t now = 0, starts = 0;
@@ -30,7 +29,6 @@ struct Radio {
   void request_stop() { stop = true; }
   void end_burst() { assert(!running); }
 };
-
 struct Observer {
   std::string last;
   uint8_t slot = 0;
@@ -41,284 +39,353 @@ struct Observer {
   void tx_result(const radio::TxEvent &event) { events.push_back(event); }
 };
 using Node = Controller<Radio, Observer>;
-
 static void tick(Node &node, Radio &radio, uint32_t now) { radio.now = now; node.tick(now); }
-static uint32_t next_counter(journal::Journal &journal, uint8_t slot = 1) {
+static uint32_t next_counter(journal::Journal &journal, uint8_t slot = 1, bool candidate = false) {
   uint32_t next = 0;
-  assert(journal.next_counter(slot, &next));
+  assert(journal.next_counter(slot, &next, candidate));
   return next;
 }
-
-static void association_confirmation() {
-  journal::MemoryFlash flash;
-  {
-    journal::Journal journal(flash);
-    Radio radio;
-    Observer observer;
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {1, 0x5A, 0}));
-    assert(!node.confirm() && observer.last == "no_pending_association");
-    assert(node.associate(0));
-    assert(!node.associate(0) && observer.last == "radio_busy");
-    assert(!node.confirm() && !node.paired(1));
-    tick(node, radio, 0);
-    assert(radio.starts == 1 && next_counter(journal) == 2);
-    // Power disappears after reservation/start; the motor response can only be
-    // asserted by the human. Recovery must not automatically emit another pair.
-  }
-  {
-    journal::Journal journal(flash);
-    Radio radio;
-    Observer observer;
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {1, 0x5A, 0}));
-    tick(node, radio, 100);
-    assert(!node.paired(1) && radio.starts == 0 && next_counter(journal) == 2);
-    assert(!node.associate(100) && observer.last == "association_counter_mismatch");
-    assert(node.confirm() && observer.last == "paired" && observer.slot == 1 && node.paired(1));
-    // The adapter owns whatever follows: the core neither pauses nor restarts.
-    assert(!node.confirm() && observer.last == "no_pending_association");
-    assert(node.command(1, Action::open, 100));
-  }
-  {
-    journal::Journal journal(flash);
-    Radio radio;
-    Observer observer;
-    Node node(journal, radio, observer);
-    assert(node.begin(true, false, 208500));
-    assert(node.paired(1) && !node.paired(2) && radio.starts == 0);
-    assert(node.command(1, Action::open, 0));
-    tick(node, radio, 0);
-    tick(node, radio, 1);
-    assert(radio.starts == 1 && next_counter(journal) == 3);
-    assert(observer.events.size() == 1 && !strcmp(observer.events.back().outcome, "emitted"));
-  }
+static void ready(Node &node, Radio &radio, journal::Journal &journal) {
+  for (uint32_t i = 0; journal.state() == journal::StorageState::initializing && i < 100; ++i)
+    tick(node, radio, i);
+  assert(journal.state() == journal::StorageState::ready);
 }
-
-static void bounded_authorization_and_radio_failure() {
+static void settle(Node &node, Radio &radio, journal::Journal &journal, uint32_t now) {
+  assert(!node.busy());
+  for (uint32_t i = 0; journal.maintenance_due() && i < 100; ++i)
+    tick(node, radio, now + i);
+  assert(!journal.maintenance_due());
+}
+static void emission(Node &node, Radio &radio, uint32_t now = 0) {
+  const auto starts = radio.starts;
+  for (uint32_t i = 0; node.busy() && radio.starts == starts && i < 100; ++i)
+    tick(node, radio, now + i);
+  assert(radio.starts == starts + 1); // claimed attempt survives idle maintenance
+  const auto started = radio.now;
+  tick(node, radio, started + 1);
+  tick(node, radio, started + 2001);
+  tick(node, radio, started + 2002);
+  assert(!node.busy());
+}
+static void add(Node &node, Radio &radio, uint8_t slot, uint32_t now = 0) {
+  for (uint32_t i = 0; i < 100; ++i) {
+    // tick() is the sole maintenance owner. A maintenance refusal is retried
+    // before a candidate exists, never after an emission permit was claimed.
+    if (node.associate(now)) break;
+    assert(i < 99);
+    tick(node, radio, now);
+  }
+  assert(node.pending_slot() == slot);
+  emission(node, radio, now);
+  bool confirmed = false;
+  for (uint32_t i = 0; !confirmed && i < 100; ++i) {
+    confirmed = node.confirm(slot);
+    if (!confirmed) tick(node, radio, now + 2003 + i);
+  }
+  assert(confirmed && node.paired(slot));
+}
+static void first_use_and_runtime_sessions() {
   journal::MemoryFlash flash;
   journal::Journal journal(flash);
   Radio radio;
   Observer observer;
+  Node node(journal, radio, observer);
+  assert(node.begin(true, true, 208500));
+  assert(!node.busy() && !node.pending_slot() && !radio.starts);
+  ready(node, radio, journal);
+  tick(node, radio, 100);
+  assert(!node.busy() && !node.pending_slot() && !radio.starts);
+  assert(journal.shutter(1).state == journal::SlotState::unused);
+  assert(!node.initialize());
+  assert(!node.confirm(1));
+  assert(node.associate(0));
+  assert(node.busy() && !node.active()); // queue-inclusive OTA quiescence
+  const auto candidate = journal.shutter(1);
+  assert(candidate.has_candidate && candidate.attempts == 1 && candidate.candidate_incarnation);
+  uint32_t identity = 0;
+  assert(journal.identity(1, &identity, true) && (identity & 255) == 1);
+  assert(!node.associate(0) && observer.last == "radio_busy");
+  assert(!node.confirm(1) && !node.paired(1));
+  emission(node, radio);
+  assert(next_counter(journal, 1, true) == 2 && observer.last == "awaiting_confirmation");
+  const auto writes = flash.programs();
+  assert(!node.associate(2003) && observer.last == "association_pending");
+  assert(flash.programs() == writes);
+  assert(node.confirm(1) && journal.shutter(1).in_service);
+  assert(journal.shutter(1).incarnation == candidate.candidate_incarnation);
+  assert(!node.confirm(1));
+  assert(node.command(1, Action::open, 2100));
+  tick(node, radio, 2100);
+  tick(node, radio, 2101);
+  assert(next_counter(journal) == 3);
+  add(node, radio, 2, 2200);  // no compiled slot, suffix or counter authorization
+  assert(journal.shutter(2).logical_id != journal.shutter(1).logical_id);
+}
+static void retry_and_power_recovery() {
+  journal::MemoryFlash flash;
+  uint32_t epoch = 0, identity = 0;
   {
+    journal::Journal journal(flash);
+    Radio radio;
+    Observer observer;
     Node node(journal, radio, observer);
     assert(node.begin(true, true, 208500));
-    assert(!node.associate(0) && observer.last == "association_profile_unqualified");
-    assert(flash.programs() == 0);
-  }
-  {
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {2, 0x5A, 0}));
-    assert(!node.associate(0) && flash.programs() == 0);
-  }
-  {
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {1, 0x5A, 2}));
-    assert(!node.associate(0) && flash.programs() == 0);
-  }
-  {
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {1, 0x5A, 0}));
+    ready(node, radio, journal);
     assert(node.associate(0));
-    tick(node, radio, 0);
-    radio.fail = true;
-    tick(node, radio, 1);
-    assert(next_counter(journal) == 2 && !node.paired(1));
-    assert(!strcmp(observer.events.back().outcome, "unknown"));
+    epoch = journal.incarnation(1, true);
+    assert(journal.identity(1, &identity, true));
+    tick(node, radio, 0);  // both reservations committed; interruption before completion
+    assert(next_counter(journal, 1, true) == 2);
   }
-  {
-    Radio resumed;
-    Node node(journal, resumed, observer);
-    assert(node.begin(true, true, 208500, {1, 0x5A, 2}));
-    assert(resumed.starts == 0 && node.associate(0));
-    tick(node, resumed, 0);
-    tick(node, resumed, 1);
-    tick(node, resumed, 2001);
-    tick(node, resumed, 2002);
-    assert(resumed.starts == 2 && next_counter(journal) == 4);
-    assert(observer.last == "awaiting_confirmation");
-    assert(!node.associate(2003) && observer.last == "association_counter_mismatch");
-  }
-  {
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {2, 0x5A, 0}));
-    assert(!node.confirm() && observer.last == "association_profile_unqualified");
-  }
-}
-
-static void pending_slots() {
-  journal::MemoryFlash flash;
-  journal::Journal journal(flash);
-  assert(journal.open() == journal::StorageState::empty);
-  assert(journal.provision(1, {0xAA0001, 0, 7}) == journal::Status::ok);
-  assert(journal.provision(3, {0xAA0003, 2, 7}) == journal::Status::ok);
-  Radio radio;
-  Observer observer;
-  Node node(journal, radio, observer);
-  assert(node.begin(true, true, 208500, {1, 0x5A, 0}));
-  assert(node.pending_slot() == Node::MULTIPLE_PENDING && observer.last == "association_pending");
-  const auto programs = flash.programs();
-  assert(!node.associate(0) && observer.last == "multiple_pending_associations");
-  assert(!node.confirm() && observer.last == "multiple_pending_associations");
-  assert(flash.programs() == programs && !node.paired(1) && !node.paired(3));
-}
-
-static void pending_slot_authorization() {
-  journal::MemoryFlash flash;
-  journal::Journal journal(flash);
-  assert(journal.open() == journal::StorageState::empty);
-  assert(journal.provision(3, {0xAA0003, 0, 7}) == journal::Status::ok);
-  Radio radio;
-  Observer observer;
-  {
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {1, 0x5A, 0}));
-    assert(node.pending_slot() == 3);
-    assert(!node.associate(0) && observer.last == "association_profile_unqualified" && observer.slot == 3);
-    assert(!node.confirm() && observer.last == "association_profile_unqualified" && observer.slot == 3);
-  }
-  {
-    Node node(journal, radio, observer);
-    assert(node.begin(true, true, 208500, {3, 0x5A, 0}));
-    // The attempt was never prepared: its reservations are the only evidence.
-    assert(!node.confirm() && observer.last == "no_association_attempt" && !node.paired(3));
-  }
-  {
-    journal::MemoryFlash other;
-    journal::Journal reserved(other);
-    assert(reserved.open() == journal::StorageState::empty);
-    assert(reserved.provision(3, {0xAA0003, 2, 7}) == journal::Status::ok);
-    Node node(reserved, radio, observer);
-    assert(node.begin(true, true, 208500, {3, 0x5A, 2}));
-    assert(node.confirm() && observer.last == "paired" && observer.slot == 3 && node.paired(3));
-    assert(node.pending_slot() == 0 && radio.starts == 0);
-  }
-}
-
-static void inventory_and_stop() {
-  journal::MemoryFlash flash;
-  journal::Journal journal(flash);
-  assert(journal.open() == journal::StorageState::empty);
-  for (uint8_t slot = 1; slot <= MAX_SHUTTERS; ++slot) {
-    assert(journal.provision(slot, {static_cast<uint32_t>(0xAA0000 + slot), 10, 1}) == journal::Status::ok);
-    if (!(slot % 2)) assert(journal.confirm(slot) == journal::Status::ok);
-  }
-  Radio radio;
-  Observer observer;
-  Node node(journal, radio, observer);
-  assert(node.begin(true, false, 208500));
-  for (uint8_t slot = 1; slot <= MAX_SHUTTERS; ++slot) {
-    assert(node.paired(slot) == !(slot % 2));
-    if (slot % 2) assert(!node.command(slot, Action::open, 0));
-  }
-  assert(node.command(2, Action::open, 0));
-  tick(node, radio, 0);
-  assert(node.command(2, Action::close, 1));
-  assert(node.command(2, Action::stop, 1));
-  tick(node, radio, 1);
-  tick(node, radio, 2);
-  assert(radio.starts == 2 && next_counter(journal, 2) == 12);
-  assert(next_counter(journal, 4) == 10);  // queued movement cancelled before reservation
-  assert(observer.events.back().job.action == Action::stop);
-  assert(!strcmp(observer.events.back().outcome, "emitted"));
-  // Native API has no session hook: local progress continues while HA is away.
-  assert(node.command(4, Action::open, 3));
-  tick(node, radio, 3);
-  tick(node, radio, 4);
-  assert(next_counter(journal, 4) == 11);
-  assert(node.command(2, Action::open, 5));
-  tick(node, radio, 5);
-  node.pause("update_in_progress");
-  assert(!node.command(4, Action::close, 5) && observer.last == "update_in_progress");
-  tick(node, radio, 6);
-  // A paused controller still services the cancelled frame, then goes quiet.
-  assert(!node.active() && !strcmp(observer.events.back().outcome, "cancelled") &&
-         !strcmp(observer.events.back().error, "session_disconnected"));
-  const auto starts = radio.starts;
-  node.resume();
-  tick(node, radio, 7);
-  assert(radio.starts == starts);  // OTA error/resume never replays a command
-  assert(node.command(2, Action::close, 8));  // a clean reconnect accepts new work
-  tick(node, radio, 8);
-  tick(node, radio, 9);
-  assert(radio.starts == starts + 1 && !strcmp(observer.events.back().outcome, "emitted"));
-}
-
-static void pause_and_disconnect() {
-  journal::MemoryFlash flash;
-  journal::Journal journal(flash);
-  assert(journal.open() == journal::StorageState::empty);
-  assert(journal.provision(1, {0xAB0001, 10, 1}) == journal::Status::ok);
-  assert(journal.confirm(1) == journal::Status::ok);
-  Radio radio;
-  Observer observer;
-  Node node(journal, radio, observer);
-  assert(node.begin(true, true, 208500, {2, 0x5A, 0}));
-  node.pause();
-  assert(!node.command(1, Action::open, 0) && observer.last == "paused");
-  assert(!node.associate(0) && observer.last == "paused");
-  assert(!node.confirm() && observer.last == "paused");
-  node.resume();
-  // A lost session drops queued work without leaving the controller paused.
-  assert(node.command(1, Action::open, 0));
-  node.disconnect();
-  assert(!strcmp(observer.events.back().outcome, "cancelled"));
-  tick(node, radio, 0);
-  assert(!radio.starts && next_counter(journal) == 10);
-  assert(node.command(1, Action::open, 1));
-  tick(node, radio, 1);
-  assert(radio.starts == 1 && node.active());
-  node.disconnect();  // the active frame ends at its boundary, never replays
-  tick(node, radio, 2);
-  assert(!node.active() && !strcmp(observer.events.back().outcome, "cancelled") &&
-         !strcmp(observer.events.back().error, "session_disconnected"));
-  assert(next_counter(journal) == 11);
-  assert(node.command(1, Action::stop, 3));
-  tick(node, radio, 3);
-  tick(node, radio, 4);
-  assert(radio.starts == 2 && next_counter(journal) == 12);
-}
-
-static void storage_failure_and_last_stop() {
-  journal::MemoryFlash flash;
   {
     journal::Journal journal(flash);
-    assert(journal.open() == journal::StorageState::empty);
-    assert(journal.provision(1, {0xAB1234, 65535, 1}) == journal::Status::ok);
-    assert(journal.confirm(1) == journal::Status::ok);
     Radio radio;
     Observer observer;
     Node node(journal, radio, observer);
-    assert(node.begin(true, false, 208500));
-    assert(node.command(1, Action::open, 0));
-    tick(node, radio, 0);
-    assert(!radio.starts && observer.last == "counter_exhausted");
-    assert(node.command(1, Action::stop, 1));
-    tick(node, radio, 1);
-    tick(node, radio, 2);
-    assert(radio.starts == 1 && next_counter(journal) == 65536);
-    assert(node.command(1, Action::stop, 3));
-    tick(node, radio, 3);
-    assert(radio.starts == 1 && observer.last == "counter_exhausted");
+    assert(node.begin(true, true, 208500));
+    tick(node, radio, 100);
+    assert(!radio.starts && node.pending_slot() == 1 && !node.paired(1));
+    uint32_t preserved = 0;
+    assert(journal.identity(1, &preserved, true) && preserved == identity);
+    assert(journal.incarnation(1, true) == epoch);
+    assert(!node.associate(100));
+    assert(node.retry(1, 100));
+    emission(node, radio, 100);
+    assert(next_counter(journal, 1, true) == 4 && journal.shutter(1).attempts == 2);
+    assert(!node.retry(1, 2200));
+    assert(node.confirm(1));
   }
-  flash.raw()[0] ^= 0xFF;
+  journal::Journal rebooted(flash);
+  Radio radio;
+  Observer observer;
+  Node node(rebooted, radio, observer);
+  assert(node.begin(true, true, 208500));
+  tick(node, radio, 0);
+  assert(!radio.starts && node.paired(1) && !node.pending_slot());
+}
+static void disconnected_before_reservation() {
+  journal::MemoryFlash flash;
   journal::Journal journal(flash);
   Radio radio;
   Observer observer;
   Node node(journal, radio, observer);
-  assert(!node.begin(true, true, 208500, {1, 0x5A, 0}));
-  assert(!node.command(1, Action::stop, 0) && !node.associate(0) && !node.confirm());
-  tick(node, radio, 0);
-  assert(!radio.starts && observer.last == "storage_corrupt");
+  assert(node.begin(true, true, 208500));
+  ready(node, radio, journal);
+  assert(node.associate(0));
+  node.disconnect();
+  tick(node, radio, 1);
+  assert(!radio.starts && next_counter(journal, 1, true) == 0);
+  assert(!node.retry(1, 1) && !node.confirm(1));
+  const auto id = journal.shutter(1).logical_id;
+  assert(node.cancel(1));
+  add(node, radio, 1, 10);
+  assert(journal.shutter(1).logical_id > id);
 }
-
+static void partial_reservation_requires_cancel() {
+  journal::MemoryFlash flash;
+  {
+    journal::Journal journal(flash);
+    Radio radio;
+    Observer observer;
+    Node node(journal, radio, observer);
+    assert(node.begin(true, true, 208500));
+    ready(node, radio, journal);
+    assert(node.associate(0));
+    flash.cut_after(journal::RECORD_BYTES / journal::PAGE_BYTES, 0);  // first reservation commits, second body fails
+    tick(node, radio, 0);
+    assert(!radio.starts && !node.valid());
+  }
+  flash.restore_power();
+  journal::Journal journal(flash);
+  Radio radio;
+  Observer observer;
+  Node node(journal, radio, observer);
+  assert(node.begin(true, true, 208500));
+  assert(next_counter(journal, 1, true) == 1);
+  assert(!node.retry(1, 1) && !node.confirm(1));
+  assert(node.cancel(1));
+  add(node, radio, 1, 10);
+}
+static void replacement_cancel_and_reuse() {
+  journal::MemoryFlash flash;
+  journal::Journal journal(flash);
+  Radio radio;
+  Observer observer;
+  Node node(journal, radio, observer);
+  assert(node.begin(true, true, 208500));
+  ready(node, radio, journal);
+  add(node, radio, 1);
+  const auto original = journal.shutter(1);
+  const auto primary_next = next_counter(journal);
+  uint32_t old_identity = 0;
+  assert(journal.identity(1, &old_identity));
+  assert(!node.replace(1, 3000) && !node.retire(1));
+  assert(node.service(1, false));
+  assert(!node.command(1, Action::open, 3000));
+  assert(node.command(1, Action::stop, 3000));  // STOP remains available when disabled
+  tick(node, radio, 3000);
+  tick(node, radio, 3001);
+  assert(node.replace(1, 3100));
+  assert(journal.shutter(1).logical_id == original.logical_id);
+  assert(journal.shutter(1).incarnation == original.incarnation);
+  assert(!node.service(1, true));
+  assert(!node.cancel(1) && observer.last == "radio_busy"); // queued candidate drained
+  settle(node, radio, journal, 3101);
+  assert(node.cancel(1));
+  assert(!journal.shutter(1).in_service && !journal.shutter(1).has_candidate);
+  uint32_t kept = 0;
+  assert(journal.identity(1, &kept) && kept == old_identity);
+  assert(next_counter(journal) == primary_next + 1);
+  assert(node.service(1, true) && node.service(1, false));
+  assert(node.replace(1, 4000));
+  const auto replacement_epoch = journal.incarnation(1, true);
+  emission(node, radio, 4000);
+  assert(node.confirm(1));
+  assert(journal.shutter(1).logical_id == original.logical_id);
+  assert(journal.incarnation(1) == replacement_epoch && replacement_epoch != original.incarnation);
+  assert(next_counter(journal) == 2);
+  assert(node.service(1, false));
+  settle(node, radio, journal, 6100);
+  assert(node.retire(1));
+  assert(!node.paired(1));
+  add(node, radio, 1, 7000);
+  assert(journal.shutter(1).logical_id > original.logical_id);
+  assert(journal.incarnation(1) != replacement_epoch);
+  const auto events = observer.events.size();
+  const auto status = observer.last;
+  node.report({{99,0,1,Action::open,false,original.incarnation}, "emitted"});
+  assert(observer.events.size() == events && observer.last == status);
+}
+static void stop_pause_and_disable_drain() {
+  journal::MemoryFlash flash;
+  journal::Journal journal(flash);
+  Radio radio;
+  Observer observer;
+  Node node(journal, radio, observer);
+  assert(node.begin(true, true, 208500));
+  ready(node, radio, journal);
+  add(node, radio, 1);
+  assert(node.command(1, Action::open, 3000));
+  tick(node, radio, 3000);
+  assert(node.command(1, Action::close, 3001));
+  assert(node.command(1, Action::stop, 3001));
+  tick(node, radio, 3001);
+  tick(node, radio, 3002);
+  assert(next_counter(journal) == 4); // queued close consumes nothing
+  assert(node.command(1, Action::open, 3010));
+  tick(node, radio, 3010);
+  assert(!node.service(1, false));
+  assert(journal.shutter(1).in_service); // persistent mutation waits for frame boundary
+  tick(node, radio, 3011);
+  settle(node, radio, journal, 3012);
+  assert(!node.busy() && node.service(1, false));
+  assert(node.service(1, true));
+  assert(node.command(1, Action::open, 3020));
+  tick(node, radio, 3020);
+  node.pause("update_in_progress");
+  assert(!node.command(1, Action::stop, 3020));
+  tick(node, radio, 3021);
+  const auto starts = radio.starts;
+  node.resume();
+  tick(node, radio, 3022);
+  assert(radio.starts == starts && !node.busy());
+}
+static void paused_stop_drain_never_maintains() {
+  journal::MemoryFlash flash;
+  journal::Journal journal(flash);
+  Radio radio;
+  Observer observer;
+  Node node(journal, radio, observer);
+  assert(node.begin(true,true,208500));
+  ready(node,radio,journal);
+  add(node,radio,1);
+  journal::Reservation reservation;
+  while (!journal.maintenance_due())
+    assert(journal.reserve(1,1,false,&reservation) == journal::Status::ok);
+  assert(node.command(1,Action::stop,3000));
+  tick(node,radio,3000);
+  node.pause("ota_busy");
+  const auto writes = flash.programs(), erases = flash.erases();
+  tick(node,radio,3001);
+  assert(!node.busy() && journal.maintenance_due());
+  for (uint32_t now : {3002u,3003u,3004u}) tick(node,radio,now);
+  assert(flash.programs() == writes && flash.erases() == erases);
+  node.resume();
+  tick(node,radio,3005);
+  assert(flash.programs() > writes || flash.erases() > erases);
+}
+static void paused_initialization_never_maintains() {
+  journal::MemoryFlash flash;
+  journal::Journal journal(flash);
+  Radio radio;
+  Observer observer;
+  Node node(journal, radio, observer);
+  assert(node.begin(false, false, 208500));
+  assert(journal.state() == journal::StorageState::initializing);
+  node.pause("ota_busy");
+  const auto writes = flash.programs(), erases = flash.erases();
+  for (uint32_t now : {1u, 2u, 3u}) tick(node, radio, now);
+  assert(flash.programs() == writes && flash.erases() == erases);
+  assert(!node.busy() && !node.initialize());
+  node.resume();
+  ready(node, radio, journal);
+  assert(!radio.starts && !node.associate(10));
+}
+static void mismatched_profile_refuses_enrollment_only() {
+  journal::MemoryFlash flash;
+  journal::Journal journal(flash);
+  Radio radio;
+  Observer observer;
+  {
+    Node node(journal, radio, observer);
+    assert(node.begin(true, true, 208500, {1}));
+    ready(node, radio, journal);
+    add(node, radio, 1);
+  }
+  Node node(journal, radio, observer);
+  assert(node.begin(true, true, 208500, {90}));
+  const auto writes = flash.programs(), erases = flash.erases(), starts = radio.starts;
+  const auto epoch = journal.incarnation(1), counter = next_counter(journal);
+  assert(!node.associate(3000) && observer.last == "association_profile_unqualified");
+  assert(!node.retry(1, 3000) && observer.last == "association_profile_unqualified");
+  assert(!node.pending_slot() && !node.busy() && !journal.shutter(2).logical_id);
+  assert(flash.programs() == writes && flash.erases() == erases && radio.starts == starts);
+  assert(journal.incarnation(1) == epoch && next_counter(journal) == counter);
+  assert(node.command(1, Action::open, 3001));
+  tick(node, radio, 3001);
+  tick(node, radio, 3002);
+  assert(radio.starts == starts + 1 && next_counter(journal) == counter + 1);
+}
+static void disabled_enrollment_and_corruption() {
+  journal::MemoryFlash flash;
+  journal::Journal journal(flash);
+  Radio radio;
+  Observer observer;
+  Node node(journal, radio, observer);
+  assert(node.begin(false, false, 208500));
+  ready(node, radio, journal);
+  assert(!node.associate(0));
+  assert(!node.command(1, Action::open, 0));
+  assert(!radio.starts);
+  flash.raw()[0] ^= 0xFF;
+  journal::Journal corrupt(flash);
+  Node broken(corrupt, radio, observer);
+  assert(!broken.begin(true, true, 208500));
+  const auto writes = flash.programs();
+  assert(!broken.initialize() && !broken.associate(0));
+  tick(broken, radio, 0);
+  assert(flash.programs() == writes && !radio.starts);
+}
 int main() {
-  association_confirmation();
-  bounded_authorization_and_radio_failure();
-  pending_slots();
-  pending_slot_authorization();
-  inventory_and_stop();
-  pause_and_disconnect();
-  storage_failure_and_last_stop();
-  puts("controller: pairing recovery, authorization, pending slots, inventory, STOP, pause and storage checks passed");
+  first_use_and_runtime_sessions();
+  retry_and_power_recovery();
+  disconnected_before_reservation();
+  partial_reservation_requires_cancel();
+  replacement_cancel_and_reuse();
+  stop_pause_and_disable_drain();
+  paused_stop_drain_never_maintains();
+  paused_initialization_never_maintains();
+  mismatched_profile_refuses_enrollment_only();
+  disabled_enrollment_and_corruption();
+  puts("controller: first use, bounded sessions, recovery, replacement, retirement/reuse and STOP checks passed");
 }
