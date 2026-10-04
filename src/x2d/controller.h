@@ -247,7 +247,9 @@ template<class Radio, class Observer> class Controller {
   void enable_runtime() {
     const auto state = journal_.state();
     const bool ready = valid_ && (state == journal::StorageState::ready || state == journal::StorageState::full);
-    runtime_.set_enabled(ready && transmit_ && radio_.available(), ready && enrollment_);
+    // Gates reflect durable readiness and configured policy. Radio availability
+    // is checked live at admission and profile selection, never latched at boot.
+    runtime_.set_enabled(ready && transmit_, ready && enrollment_);
   }
   void boot_status() {
     status(!transmit_ ? "transmission_disabled" : !radio_.available() ? "radio_unavailable" :

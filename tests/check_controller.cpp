@@ -121,6 +121,42 @@ static void first_use_and_runtime_sessions() {
   add(node, radio, 2, 2200);  // no compiled slot, suffix or counter authorization
   assert(journal.shutter(2).logical_id != journal.shutter(1).logical_id);
 }
+static void radio_returns_after_initialization_and_boot() {
+  journal::MemoryFlash flash;
+  Radio radio;
+  Observer observer;
+  radio.healthy = false;
+  {
+    journal::Journal journal(flash);
+    Node node(journal, radio, observer);
+    assert(node.begin(true, true, 208500));
+    ready(node, radio, journal);
+    assert(!node.associate(0) && observer.last == "radio_unavailable");
+    assert(!node.pending_slot() && !node.busy() && !radio.starts);
+    radio.healthy = true;
+    node.resume();
+    tick(node, radio, 100);
+    assert(!node.pending_slot() && !node.busy() && !radio.starts);
+    assert(node.associate(101));
+    emission(node, radio, 101);
+    assert(node.confirm(1));
+  }
+  const auto starts = radio.starts;
+  radio.healthy = false;
+  journal::Journal reboot(flash);
+  Node commands(reboot, radio, observer);
+  assert(commands.begin(true, false, 208500));
+  assert(!commands.command(1, Action::open, 3000));
+  assert(next_counter(reboot) == 2);
+  radio.healthy = true;
+  commands.resume();
+  tick(commands, radio, 3001);
+  assert(!commands.busy() && radio.starts == starts && next_counter(reboot) == 2);
+  assert(commands.command(1, Action::open, 3002));
+  tick(commands, radio, 3002);
+  tick(commands, radio, 3003);
+  assert(radio.starts == starts + 1 && next_counter(reboot) == 3);
+}
 static void retry_and_power_recovery() {
   journal::MemoryFlash flash;
   uint32_t epoch = 0, identity = 0;
@@ -378,6 +414,7 @@ static void disabled_enrollment_and_corruption() {
 }
 int main() {
   first_use_and_runtime_sessions();
+  radio_returns_after_initialization_and_boot();
   retry_and_power_recovery();
   disconnected_before_reservation();
   partial_reservation_requires_cancel();
