@@ -10,6 +10,7 @@ struct TxJob {
   uint8_t shutter_id = 0;
   Action action = Action::none;
   bool enrollment = false;
+  uint32_t incarnation = 0;  // captured at admission, never rebound to a reused slot
 };
 class TxQueue {
  public:
@@ -20,7 +21,8 @@ class TxQueue {
     expire(now, report);
     if (job.action == Action::stop) {
       for (size_t i = 0; i < size_;) {
-        if (jobs_[i].shutter_id == job.shutter_id && !jobs_[i].enrollment) {
+        if (jobs_[i].shutter_id == job.shutter_id &&
+            jobs_[i].incarnation == job.incarnation && !jobs_[i].enrollment) {
           report(jobs_[i], "cancelled"); remove(i);
         }
         else ++i;
@@ -51,6 +53,14 @@ class TxQueue {
   }
   bool stop_waiting() const { return size_ && jobs_[0].action == Action::stop; }
   size_t size() const { return size_; }
+  // Lifecycle changes invalidate queued work for this logical slot only.
+  // Report each removed job unchanged so consumers can fence its incarnation.
+  template<class Report> void cancel_slot(uint8_t slot, Report report) {
+    for (size_t i = 0; i < size_;) {
+      if (jobs_[i].shutter_id == slot) { report(jobs_[i], "cancelled"); remove(i); }
+      else ++i;
+    }
+  }
   template<class Report> void clear(Report report) {
     while (size_) { report(jobs_[0], "cancelled"); remove(0); }
   }

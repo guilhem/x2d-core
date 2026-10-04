@@ -12,7 +12,7 @@ namespace x2d {
 namespace radio {
 
 struct TxProfile {
-  uint8_t copies = 0;  // caller-qualified; zero refuses transmission
+  uint8_t copies = 0;  // caller-authorized; zero refuses transmission
   uint32_t chip_ns = 208500;  // caller can calibrate fractional microseconds
   uint32_t second_start_ms = 2001;  // enrollment only, from the first burst start
 };
@@ -43,7 +43,7 @@ struct TxEvent {
 //     return unknown after a detected underrun or timing fault, not complete.
 //   void end_burst(): carrier off/release waveform, only after complete/fault.
 // Hooks:
-//   bool profile(const TxJob&, TxProfile&): only return qualified profiles.
+//   bool profile(const TxJob&, TxProfile&): only return authorized profiles; authorization is not hardware qualification.
 //   bool build(const TxJob&, const journal::Reservation&, uint8_t phase, Body&):
 //     phase 0 for normal commands, phases 0/1 for genuine B enrollment; dispatch to
 //     caller's action/enrollment builder. No action bytes or enrollment format
@@ -71,7 +71,7 @@ class RadioRuntime {
 
   bool submit(TxJob job, uint32_t now) {
     const char* error = nullptr;
-    if (!job.request_id || job.shutter_id < 1 || job.shutter_id > MAX_SHUTTERS ||
+    if (!job.request_id || !job.incarnation || job.shutter_id < 1 || job.shutter_id > MAX_SHUTTERS ||
         (job.enrollment ? job.action != Action::none
                         : job.action != Action::open && job.action != Action::close &&
                           job.action != Action::stop)) error = "invalid_request";
@@ -87,15 +87,27 @@ class RadioRuntime {
     } else if (journal_.state() == journal::StorageState::full) {
       report(job, "rejected", "storage_full", 0, journal::Status::no_space);
       return false;
-    } else if (journal_.shutter(job.shutter_id).state == journal::SlotState::unused)
+    } else if (journal_.state() != journal::StorageState::ready)
+      error = "storage_not_ready";
+    else if (!matches(job)) error = "stale_incarnation";
+    else if (journal_.shutter(job.shutter_id).state == journal::SlotState::unused)
       error = "unknown_shutter";
+    else if (job.enrollment && !journal_.shutter(job.shutter_id).has_candidate)
+      error = "no_pending_association";
     else if (!job.enrollment &&
              journal_.shutter(job.shutter_id).state != journal::SlotState::paired)
       error = "not_paired";
+    else if (!job.enrollment && !is_stop(job) &&
+             (!journal_.shutter(job.shutter_id).in_service ||
+              journal_.shutter(job.shutter_id).has_candidate))
+      error = "shutter_disabled";
     else if (is_stop(job) && active_ && is_stop(current_) &&
-             current_.shutter_id == job.shutter_id)
+             current_.shutter_id == job.shutter_id && current_.incarnation == job.incarnation)
       error = "stop_in_progress";  // coalesce without a second reservation
-    else if (!is_stop(job) && journal_.maintenance_due())
+    // Enrollment has already durably allocated/claimed its attempt. It can
+    // wait for idle maintenance before either reservation; rejecting here
+    // would strand a valid transient permit at the maintenance threshold.
+    else if (!job.enrollment && !is_stop(job) && journal_.maintenance_due())
       error = "maintenance_pending";
     if (error) {
       report(job, "rejected", error);
@@ -117,12 +129,26 @@ class RadioRuntime {
     if (active_) cancel("cancelled", "session_disconnected");
   }
 
+  // Drain only this logical slot before a lifecycle mutation; the caller must
+  // keep ticking until active work has reached its complete-frame boundary.
+  void cancel_slot(uint8_t slot) {
+    queue_.cancel_slot(slot, queue_report());
+    if (active_ && current_.shutter_id == slot) cancel("cancelled", "lifecycle_cancelled");
+  }
+
   size_t pending() const { return queue_.size(); }
   bool active() const { return active_; }
 
-  void tick(uint32_t now) {
+  // allow_work=false drains cancellation only: no reservations, dequeues or
+  // journal maintenance, including the tick that finishes the active frame.
+  void tick(uint32_t now, bool allow_work = true) {
     queue_.expire(now, queue_report());
     if (active_) {
+      if (!matches(current_)) cancel("cancelled", "stale_incarnation");
+      else if (!current_.enrollment && !is_stop(current_) &&
+               (!journal_.shutter(current_.shutter_id).in_service ||
+                journal_.shutter(current_.shutter_id).has_candidate))
+        cancel("cancelled", "shutter_disabled");
       if (!cancel_outcome_ && expired(current_, now))
         cancel("expired", "deadline_expired");
       if (active_ && burst_running_) {
@@ -138,6 +164,7 @@ class RadioRuntime {
         else if (!current_.enrollment || phase_ == 1) finish("emitted");
       }
       if (active_) {
+        if (!allow_work) return; // never start phase 1 while work is suspended
         // Carrier idle, no journal maintenance or other command in this gap.
         if (static_cast<int32_t>(now - second_start_) >= 0) {
           phase_ = 1;
@@ -147,7 +174,7 @@ class RadioRuntime {
         return;
       }
     }
-    if (fault_ != journal::Status::ok) return;
+    if (!allow_work || fault_ != journal::Status::ok) return;
     // STOP bypasses maintenance, including a rotation partly erased at idle.
     // Every other command waits for idle maintenance BEFORE reserving a page.
     if (!queue_.stop_waiting() && journal_.maintenance_due()) {
@@ -159,6 +186,16 @@ class RadioRuntime {
       return;  // at most one bounded maintenance step per tick
     }
     if (!queue_.pop(now, current_, queue_report())) return;
+    if (!matches(current_)) {
+      report(current_, "rejected", "stale_incarnation");
+      return;
+    }
+    const auto shutter = journal_.shutter(current_.shutter_id);
+    if (!current_.enrollment && !is_stop(current_) &&
+        (!shutter.in_service || shutter.has_candidate)) {
+      report(current_, "rejected", "shutter_disabled");
+      return;
+    }
     profile_ = TxProfile{};
     if (!hooks_.profile(current_, profile_) || !profile_.copies ||
         profile_.copies > MAX_COPIES || !profile_.chip_ns ||
@@ -172,7 +209,7 @@ class RadioRuntime {
     for (uint8_t phase = 0; phase < phases; ++phase) {
       const journal::Status status = journal_.reserve(
           current_.shutter_id, static_cast<uint8_t>(current_.action),
-          is_stop(current_), &reservations[phase]);
+          is_stop(current_), &reservations[phase], current_.incarnation, current_.enrollment);
       if (status != journal::Status::ok) {
         report(current_, "rejected", storage_error(status), 0, status);
         if (status == journal::Status::io_error || status == journal::Status::corrupt)
@@ -208,6 +245,10 @@ class RadioRuntime {
 
  private:
   static constexpr uint32_t ENROLLMENT_ACTIVE_MS = 6000;
+  bool matches(const TxJob& job) const {
+    return job.incarnation &&
+           journal_.incarnation(job.shutter_id, job.enrollment) == job.incarnation;
+  }
   static bool is_stop(const TxJob& job) {
     return !job.enrollment && job.action == Action::stop;
   }
@@ -220,6 +261,12 @@ class RadioRuntime {
   }
   void report(const TxJob& job, const char* outcome, const char* error = nullptr,
               uint8_t completed = 0, journal::Status status = journal::Status::ok) {
+    // Preserve the captured epoch in every outcome. A stale completion cannot
+    // certify a replacement, even when its waveform completed successfully.
+    if (job.request_id && job.incarnation && status == journal::Status::ok && !matches(job)) {
+      outcome = "cancelled";
+      error = "stale_incarnation";
+    }
     hooks_.report(TxEvent{job, outcome, error, completed, status});
   }
   auto queue_report() {
@@ -234,6 +281,7 @@ class RadioRuntime {
     });
   }
   void start_burst(uint32_t now) {
+    if (!matches(current_)) { finish("cancelled", "stale_incarnation"); return; }
     uint32_t started = now;
     if (!radio_.start_burst(waves_[phase_], profile_.chip_ns, started))
       finish("rejected", "radio_start_failed");

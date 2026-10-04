@@ -61,7 +61,7 @@ cmake --install build --prefix "$PWD/install"
 Replace `add_subdirectory(...)` in the consumer with:
 
 ```cmake
-find_package(x2d-core 0.1 CONFIG REQUIRED)
+find_package(x2d-core 0.2.0 CONFIG REQUIRED)
 ```
 
 Configure that consumer with `-DCMAKE_PREFIX_PATH=/path/to/install` and link the
@@ -74,10 +74,10 @@ the application still supplies its board adapters and a C++17 toolchain.
 | --- | --- |
 | `x2d/types.h` | `Action` and the 16-slot bound |
 | `x2d/radio_codec.h` | Bodies, rolling transform, strict ordinary-body parsing and packed biphase-mark waveforms |
-| `x2d/journal.h` | Durable identities, association state and counter reservations through `journal::Flash` |
+| `x2d/journal.h` | Durable logical IDs, reusable slots, RF incarnations, candidates and counter reservations through `journal::Flash` |
 | `x2d/tx_queue.h` | Bounded queue, expiry and STOP priority |
 | `x2d/radio_runtime.h` | `radio::RadioRuntime<Radio, Hooks>`: reservation, burst scheduling and cancellation |
-| `x2d/controller.h` | `Controller<Radio, Observer>`: admission, supervised association and authorization |
+| `x2d/controller.h` | `Controller<Radio, Observer>`: admission, supervised add/replace/retire lifecycle and user confirmation |
 | `x2d/cc1101.h` | `cc1101::Driver<Bus, Mode>`: checked SPI/register/GPIO operations |
 
 The application owns `Flash`, `Journal`, `Radio`, `Observer` (or runtime `Hooks`)
@@ -128,28 +128,104 @@ starting 2001 ms after the first. These values do not establish compatibility
 with other motors or boards. Calibrate chip timing through `chip_ns` (nominal
 208500 ns); do not remove that adjustment for real hardware.
 
-Runtime transmission/enrollment gates start disabled. Controller callers choose
-those gates in `begin()`. Association additionally requires explicit
-`PairingAuthorization` for one slot, identity suffix and expected next counter.
-This is supervised trial authorization, not a qualified RF profile. After an
-attempt, only the user's observation of motor response justifies `confirm()`;
-`emitted` proves local waveform completion, never motor reception or position.
+Runtime transmission/enrollment gates start disabled. Call
+`begin(transmit, enrollment, chip_ns, EnrollmentProfile{identity_suffix})` to
+choose them. The public default suffix `0x01` is a candidate profile awaiting
+motor qualification. A private profile must match the initialized journal's
+policy: `enrollment_profile_matches(suffix)` checks this without exporting RF
+values. A mismatched profile refuses association before allocating identities;
+existing ordinary commands retain their stored identities.
+
+## Add, replace and retire
+
+There are 16 reusable physical slots and one pending association candidate at a
+time. `associate(now_ms)` allocates the first free slot, a never-reused logical
+ID and a fresh private RF incarnation. No per-shutter recompilation is needed.
+Logical IDs run from 2 through 254: 253 additions over a journal's lifetime,
+including cancelled initial candidates. The RF allocator walks at most 65,536
+prefix positions without wrapping, skips prefix zero and retained exclusions,
+and combines each prefix with the initialized suffix. Replacement uses another
+RF identity/incarnation without consuming another logical ID. Exhaustion refuses
+new allocations; erasing storage is not a safe identity-renewal procedure.
+
+Use `pending_slot()` and `Journal::shutter(slot)` for authoritative state. A
+candidate's existence and claimed attempt count persist, but RF jobs and emission
+permits do not. Boot never resumes association. The initial gesture reserves
+counters 0/1 before either burst; `retry(slot, now_ms)` allows one explicit retry
+with counters 2/3. A partial reservation ending at counter 1 cannot retry and
+requires cancellation. A restored complete attempt may be confirmed, retried
+once when eligible, or cancelled by explicit user action.
+
+Only the user's observation of motor response justifies `confirm(slot)`.
+Confirmation targets that candidate, swaps it into the primary binding and
+marks it in service. Local `emitted` results prove waveform completion, never
+motor reception or position. `service(slot, false)` disables ordinary movement;
+STOP remains available on a disabled paired binding.
+
+`replace(slot, now_ms)` requires a disabled paired shutter. It preserves the
+logical ID, keeps the old primary identity/counter disabled, and persists a new
+candidate separately. Confirmation replaces the primary atomically; cancellation
+drops the candidate and leaves the old primary disabled. `cancel(slot)` on an
+initial candidate frees its slot without recycling its logical or RF IDs.
+`retire(slot)` requires a disabled paired shutter without a candidate; its public
+view becomes empty (`logical_id == 0`). A later addition may reuse the physical
+slot but always receives a fresh logical ID. Adapters can therefore preserve an
+HA device on explicit replacement and prevent old automations from targeting a
+newly added shutter after retirement.
+
+Lifecycle changes require idle RF. Cancellation or disabling during queued or
+active work requests draining and returns a refusal; tick until idle, then repeat
+the user action. Idle maintenance can also defer a mutation. These refusals do
+not authorize automatic RF retry.
+
+## Persistence and upgrade
 
 `Flash` must map exactly 64 KiB outside application images and filesystems,
-with 256-byte pages and 4096-byte sectors. The journal's version-1 binary format
-uses two 32 KiB banks, body/readback/commit records and CRCs. A reservation is
-durable before RF; every repeated copy shares it. Cancellation, failed RF,
-disconnection and reboot never roll counters back or replay work. Both enrollment
-counters are reserved before either burst. Corruption refuses mutations without
-automatic formatting; storage I/O faults require journal recovery and a fresh
-runtime/controller. Simultaneous damage to both pages of a record is outside the
+with 256-byte pages and 4096-byte sectors. The mapping and OTA partition layout
+remain application-owned and unchanged. Journal v2 uses two 32 KiB banks, each
+with 42 records. A record contains a 512-byte CRC-protected body, programmed and
+read back page by page, followed by a separately verified 256-byte commit. The
+remaining 512 bytes hold a downgrade fence.
+
+`open()` distinguishes `empty`, `legacy` (valid v1), `initializing`, `ready`,
+`full` and `corrupt`. On erased storage the controller starts initialization.
+A valid v1 image requires the explicit one-time `initialize()` controller action
+(or `Journal::initialize(generation, identity_seed, suffix)` for direct users).
+This discards all v1 associations/counters and retains their RF identities solely
+as permanent allocator exclusions: existing motors must be paired again. It
+commits the v2 initialization marker and exclusions into the other bank before
+idle `maintain()` erases the v1 bank and finalizes readiness. Power loss resumes
+initialization with RF gated off. No v1 bindings are migrated. A downgrade fence
+makes v1 readers fail closed after completion; reintroduced stale v1 records
+are refused by v2. Unknown versions and corrupt data are never autoformatted.
+
+A reservation is durable before RF; repeated copies share that reservation.
+Cancellation, failed RF, disconnection and reboot never roll counters back or
+replay jobs. Intact uncommitted successor bodies conservatively burn allocator
+claims and counters, without enabling a new binding. Storage I/O faults require
+journal recovery and a fresh runtime/controller. Simultaneous damage to body and
+commit, or externally restoring an older complete flash image, is outside the
 recovery guarantee.
 
+Every `TxJob` captures a nonzero `incarnation`; runtime admission, reservation
+and emission recheck it so work for an old binding cannot reach a replacement
+or a reused physical slot. Direct consumers must capture
+`Journal::incarnation(slot, candidate)` when admitting work and pass it to
+`reserve(slot, command, critical, out, incarnation, candidate)`. A successful
+`Reservation` also carries that incarnation. The default zero incarnation is a
+trusted low-level primitive escape hatch; it is never used by the runtime.
+`provision()`/primitive `confirm()` remain available for backend consumers,
+with a bounded 32-entry exclusion history for arbitrary supplied RF identities;
+they do not migrate v1 storage or bypass a pending lifecycle candidate.
+
 Counter `0xFFFF` and the last 16 records of the active bank are reserved for STOP.
-This is a bounded reserve, not unlimited STOP capacity. Run maintenance while
-idle before further movements. STOP takes queue priority and preempts movement
-at a full-frame boundary; an already committed peripheral frame can add latency.
-There is no guarantee of motor response or absolute position feedback.
+Ordinary writes stop at that reserve; 16 further critical reservations can serve
+one STOP per registered slot. Maintenance becomes due at 32 free records, giving
+idle bank preparation room before the reserve is reached. Run it while idle;
+each step erases at most one sector or writes one snapshot/fence. STOP bypasses
+idle maintenance, takes queue priority and preempts movement at a full-frame
+boundary. This is bounded capacity, not a guarantee of motor response or position;
+an already committed peripheral frame can add latency.
 
 See [the radio format](docs/RADIO_PROTOCOL.md) and the contracts in the public
 headers for exact limits.
@@ -165,7 +241,8 @@ cmake --build build --parallel 2
 `X2D_BUILD_TESTING` defaults on for the standalone library and off under
 `add_subdirectory`, even if the parent's `BUILD_TESTING` is on. Dependency use
 does not enable testing globally. The existing checks cover codec vectors,
-power cuts/corruption, counter exhaustion, queue/STOP behavior, runtime faults,
+initialization/upgrade power cuts, allocator history, slot reuse, replacement,
+retirement, corruption, counter exhaustion, queue/STOP behavior, runtime faults,
 supervised association and simulated CC1101 SPI/GPIO. A small external consumer
 runs the same source against both `add_subdirectory` and a relocated installed
 package, compiles every public header alone, checks inherited C++17, and checks
@@ -183,7 +260,7 @@ passing CI before creating a matching `vX.Y.Z` tag and publishing its GitHub
 release. Both a tag push and release publication rerun the checks on the tagged
 commit. A release created directly is checked after publication.
 
-To check a proposed tag locally, configure with `-DX2D_RELEASE_TAG=v0.1.0`,
+To check a proposed tag locally, configure with `-DX2D_RELEASE_TAG=v0.2.0`,
 using the intended version. A mismatched tag fails configuration. GitHub's
 source ZIP and tar.gz archives contain the complete header-only library.
 

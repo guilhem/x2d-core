@@ -49,11 +49,14 @@ static radio::Body decode_frame(const radio::Waveform& wave, size_t begin, size_
 // Inspect COMMITTED flash, not the reservation passed to a fake builder.
 static journal::detail::Image durable_image(MemoryFlash& flash) {
   journal::detail::Image newest{};
-  for (uint32_t offset = 0; offset < REGION_BYTES; offset += 2 * PAGE_BYTES) {
-    journal::detail::Image image;
-    if (journal::detail::classify(flash.raw() + offset, flash.raw() + offset + PAGE_BYTES,
-                         &image) == journal::detail::PairKind::committed &&
-        image.sequence > newest.sequence) newest = image;
+  for (uint32_t bank = 0; bank < 2; ++bank) {
+    for (uint32_t record = 0; record < PAIRS_PER_BANK; ++record) {
+      const uint32_t offset = bank * BANK_BYTES + record * RECORD_BYTES;
+      journal::detail::Image image;
+      if (journal::detail::classify(flash.raw() + offset, flash.raw() + offset + BODY_BYTES,
+                                   &image) == journal::detail::PairKind::committed &&
+          image.sequence > newest.sequence) newest = image;
+    }
   }
   return newest;
 }
@@ -101,15 +104,19 @@ struct FakeRadio {
       assert(((body.bytes[body.length - 2] << 8) | body.bytes[body.length - 1]) ==
              radio::body_checksum(body.bytes, body.length));
     }
-    const journal::detail::Image image = durable_image(flash);
+    Journal committed(flash);
+    const auto state = committed.open();
+    assert(state == StorageState::ready || state == StorageState::full);
     bool durable = false;
-    for (const auto& slot : image.slots)
-      if (slot.identity == frame.parsed.identity) {
-        durable = slot.next >= uint32_t{frame.parsed.counter} + 1;
-        if (pair) assert(slot.next == uint32_t{frame.parsed.counter} +
-                                     (body.length == 12 ? 2 : 1));
+    for (uint8_t id = 1; id <= SLOTS; ++id) {
+      uint32_t identity = 0, next = 0;
+      if (committed.identity(id, &identity, pair) && identity == frame.parsed.identity) {
+        assert(committed.next_counter(id, &next, pair));
+        durable = next >= uint32_t{frame.parsed.counter} + 1;
+        if (pair) assert(next == uint32_t{frame.parsed.counter} + (body.length == 12 ? 2 : 1));
       }
-    assert(durable);  // BOTH pair counters must be committed before the first RF
+    }
+    assert(durable);  // BOTH pair reservations survive reopening before RF
     assert(flash.programs() == programs && flash.erases() == erases);
     frames.push_back(frame);
   }
@@ -168,9 +175,14 @@ struct Hooks {
   }
   bool build(const TxJob& job, const Reservation& reservation, uint8_t phase,
              radio::Body& body) {
-    const auto image = durable_image(flash);
-    assert(image.slots[job.shutter_id - 1].next == uint32_t{reservation.counter} +
-           (job.enrollment && phase == 0 ? 2 : 1));
+    Journal committed(flash);
+    const auto state = committed.open();
+    assert(state == StorageState::ready || state == StorageState::full);
+    uint32_t next = 0;
+    assert(committed.next_counter(job.shutter_id, &next, job.enrollment));
+    assert(next == uint32_t{reservation.counter} + (job.enrollment && phase == 0 ? 2 : 1));
+    assert(committed.incarnation(job.shutter_id, job.enrollment) == job.incarnation);
+    assert(reservation.incarnation == job.incarnation);
     reservations.push_back(reservation);
     phases.push_back(phase);
     if (refuse_body || phase == refuse_phase) return false;
@@ -207,6 +219,8 @@ struct Fixture {
   radio::RadioRuntime<FakeRadio, Hooks> runtime{journal, radio, hooks};
   explicit Fixture(bool enabled = true, uint16_t first = 100) {
     assert(journal.open() == StorageState::empty);
+    assert(journal.initialize(0x123456789ABCDEF0ull, 0xABCD, 1) == Status::ok);
+    while (journal.state() == StorageState::initializing) assert(journal.maintain() == Status::ok);
     assert(journal.provision(1, {0x186054, first, 0x123456789ABCDEF0ull}) == Status::ok);
     assert(journal.provision(2, {0x186091, 700, 0x123456789ABCDEF0ull}) == Status::ok);
     assert(journal.confirm(1) == Status::ok && journal.confirm(2) == Status::ok);
@@ -214,7 +228,14 @@ struct Fixture {
   }
   bool submit(uint32_t id, uint8_t slot, Action action, uint32_t now = 10,
               bool enrollment = false) {
-    return runtime.submit({id, 0, slot, action, enrollment}, now);
+    if (enrollment) prepare_candidate(slot);
+    return runtime.submit({id, 0, slot, action, enrollment, journal.incarnation(slot, enrollment)}, now);
+  }
+  void prepare_candidate(uint8_t slot = 1) {
+    if (journal.shutter(slot).has_candidate) return;
+    assert(journal.set_service(slot, false) == Status::ok);
+    assert(journal.allocate_candidate(slot, true) == Status::ok);
+    assert(journal.claim_attempt(slot, false) == Status::ok);
   }
   void tick(uint32_t now) { radio.now = now; runtime.tick(now); }
   void drain(uint32_t now = 10) {
@@ -223,6 +244,11 @@ struct Fixture {
       tick(now++);
     }
     assert(!runtime.pending() && !runtime.active());
+  }
+  void settle(uint32_t now = 10) {
+    assert(!runtime.active() && !runtime.pending());
+    for (unsigned i = 0; journal.maintenance_due() && i < 100; ++i) tick(now);
+    assert(!journal.maintenance_due());
   }
   void due() {
     Reservation reservation;
@@ -233,6 +259,7 @@ struct Fixture {
 
 static void check_independent_slots_and_shared_copies() {
   Fixture f;
+  const auto programs = f.flash.programs(), erases = f.flash.erases();
   assert(f.submit(1, 1, Action::open));
   assert(f.submit(2, 2, Action::close));
   assert(f.submit(3, 1, Action::close));
@@ -252,7 +279,8 @@ static void check_independent_slots_and_shared_copies() {
     assert(!strcmp(f.hooks.event(command + 1).outcome, "emitted"));
     assert(f.hooks.event(command + 1).completed_copies == 3);
   }
-  assert(f.flash.programs() == 14 && f.flash.erases() == 0 && !f.flash.violations());
+  assert(f.flash.programs() == programs + 3 * RECORD_BYTES / PAGE_BYTES &&
+         f.flash.erases() == erases && !f.flash.violations());
 }
 
 static void check_stop_preemption() {
@@ -297,7 +325,8 @@ static void check_stop_preemption() {
 static void check_stop_during_maintenance() {
   Fixture f;
   f.due();
-  f.tick(10);  // first rotation to bank 1 (other bank was blank)
+  // First rotation also installs the downgrade fence in the blank bank.
+  for (unsigned i = 0; i < 100 && f.journal.maintenance_due(); ++i) f.tick(10);
   assert(!f.journal.maintenance_due());
   f.due();  // bank 0 still has committed pages, so rotation needs sector erases
   assert(!f.submit(1, 2, Action::close));  // refuse admission before maintenance
@@ -308,7 +337,7 @@ static void check_stop_during_maintenance() {
   assert(f.submit(2, 1, Action::stop, 11));
   f.tick(11);
   assert(f.radio.frames.size() == 1 && f.radio.frames[0].parsed.action == 0x04);
-  assert(f.flash.programs() == programs + 2 && f.flash.erases() == 1);
+  assert(f.flash.programs() == programs + RECORD_BYTES / PAGE_BYTES && f.flash.erases() == 1);
   assert(!f.submit(3, 2, Action::open, 12));
   f.tick(12);
   assert(f.flash.erases() == 1);  // never erase while a radio frame is in flight
@@ -373,13 +402,13 @@ static void check_expiry_disconnect_and_recovery() {
   assert(rebooted.open() == StorageState::ready);
   radio::RadioRuntime<FakeRadio, Hooks> runtime(rebooted, f.radio, f.hooks);
   runtime.set_enabled(true);
-  assert(runtime.submit({5, 0, 1, Action::open, false}, 20));
+  assert(runtime.submit({5, 0, 1, Action::open, false, rebooted.incarnation(1)}, 20));
   runtime.tick(20);
   assert(f.radio.frames.back().parsed.counter == 102);
   runtime.disconnect();
   f.radio.done = true;
   runtime.tick(21);
-  assert(runtime.submit({6, 0, 2, Action::open, false}, 22));
+  assert(runtime.submit({6, 0, 2, Action::open, false, rebooted.incarnation(2)}, 22));
   runtime.tick(22);
   assert(f.radio.frames.back().parsed.counter == 700);  // never reserved pending job
   runtime.disconnect();
@@ -389,13 +418,16 @@ static void check_expiry_disconnect_and_recovery() {
 
 static void check_gates_builders_and_faults() {
   Fixture f(false);
-  const uint32_t programs = f.flash.programs();
   assert(!f.submit(1, 1, Action::open));
   assert(!strcmp(f.hooks.event(1).error, "tx_disabled"));
   f.runtime.set_enabled(true);
   assert(!f.submit(2, 1, Action::none, 10, true));
   assert(!f.submit(3, 1, Action::stop, 10, true));
   assert(!strcmp(f.hooks.event(3).error, "invalid_request"));
+  assert(f.journal.cancel_candidate(1) == Status::ok);
+  assert(f.journal.set_service(1, true) == Status::ok);
+  while (f.journal.maintenance_due()) assert(f.journal.maintain() == Status::ok);
+  const uint32_t programs = f.flash.programs();
   f.hooks.qualified = false;
   assert(f.submit(4, 1, Action::open));
   f.drain();
@@ -409,6 +441,8 @@ static void check_gates_builders_and_faults() {
   assert(f.hooks.enrollment_calls == 1 && f.radio.frames.empty());
   f.hooks.refuse_phase = -1;
   assert(!strcmp(f.hooks.event(5).error, "body_refused"));
+  assert(f.journal.cancel_candidate(1) == Status::ok);
+  assert(f.journal.set_service(1, true) == Status::ok);
   f.runtime.set_enabled(true);
   f.radio.fail_start = true;
   assert(f.submit(6, 1, Action::open));
@@ -417,18 +451,19 @@ static void check_gates_builders_and_faults() {
   f.radio.fail_start = false;
   assert(f.submit(7, 1, Action::open));
   f.tick(10);
-  assert(f.radio.frames.back().parsed.counter == 103);
+  assert(f.radio.frames.back().parsed.counter == 101);
   f.radio.fail_poll = true;
   f.tick(11);
   assert(!strcmp(f.hooks.event(7).outcome, "unknown"));
   f.radio.fail_poll = false;
+  f.settle();
   assert(f.submit(8, 1, Action::open));
   f.drain();
-  assert(f.radio.frames.back().parsed.counter == 104);
+  assert(f.radio.frames.back().parsed.counter == 102);
 
   Fixture io;
   assert(io.submit(1, 1, Action::open) && io.submit(2, 2, Action::close));
-  io.flash.cut_after(1, 0);  // body written; commit fails, counter is burnt
+  io.flash.cut_after(BODY_BYTES / PAGE_BYTES, 0);  // body written; commit fails, counter is burnt
   io.tick(10);
   assert(io.radio.frames.empty() && io.runtime.pending() == 0);
   for (uint32_t id : {1u, 2u}) {
@@ -441,7 +476,7 @@ static void check_gates_builders_and_faults() {
   assert(recovered.open() == StorageState::ready);
   radio::RadioRuntime<FakeRadio, Hooks> fresh(recovered, io.radio, io.hooks);
   fresh.set_enabled(true);
-  assert(fresh.submit({4, 0, 1, Action::stop, false}, 20));
+  assert(fresh.submit({4, 0, 1, Action::stop, false, recovered.incarnation(1)}, 20));
   fresh.tick(20);
   assert(io.radio.frames.back().parsed.counter == 101);
   fresh.disconnect();
@@ -472,11 +507,12 @@ static void check_overflow_and_critical_counter() {
   last.runtime.set_enabled(true, true);
   assert(last.submit(2, 1, Action::none, 10, true));
   last.drain();
-  assert(!strcmp(last.hooks.event(2).error, "counter_exhausted"));
-  assert(last.hooks.enrollment_calls == 0);  // enrollment never gets critical reserve
+  assert(!strcmp(last.hooks.event(2).outcome, "emitted"));
+  assert(last.hooks.enrollment_calls == 2);  // candidate counters are independent
+  assert(last.journal.cancel_candidate(1) == Status::ok);
   assert(last.submit(3, 1, Action::stop));
   last.drain();
-  assert(last.radio.frames.size() == 3 && last.radio.frames[0].parsed.counter == 0xffff);
+  assert(last.radio.frames.size() == 9 && last.radio.frames.back().parsed.counter == 0xffff);
   assert(last.submit(4, 1, Action::stop));
   last.drain();
   assert(!strcmp(last.hooks.event(4).error, "counter_exhausted"));
@@ -485,9 +521,11 @@ static void check_overflow_and_critical_counter() {
   // pages left. Pending duplicates coalesce before any reservation is made.
   Fixture batch;
   for (uint8_t slot = 3; slot <= SLOTS; ++slot) {
+    while (batch.journal.maintenance_due()) assert(batch.journal.maintain() == Status::ok);
     assert(batch.journal.provision(slot, {uint32_t{0x180000} + slot, 900, 1}) == Status::ok);
     assert(batch.journal.confirm(slot) == Status::ok);
   }
+  const auto erases = batch.flash.erases();
   Reservation reservation;
   while (batch.journal.reserve(1, 1, false, &reservation) == Status::ok) {}
   assert(batch.journal.maintenance_due());
@@ -498,7 +536,8 @@ static void check_overflow_and_critical_counter() {
   assert(!strcmp(batch.hooks.event(1).outcome, "cancelled"));
   batch.drain();
   assert(batch.hooks.reservations.size() == 16 && batch.radio.frames.size() == 16);
-  assert(batch.flash.erases() == 0 && batch.flash.violations() == 0);
+  assert(batch.flash.violations() == 0);
+  for (const auto& burst : batch.radio.bursts) assert(burst.erases == erases);
   for (uint32_t id = 2; id <= 17; ++id)
     assert(!strcmp(batch.hooks.event(id).outcome, "emitted"));
 
@@ -513,7 +552,7 @@ static void check_overflow_and_critical_counter() {
 
 static uint32_t next_counter(const Journal& journal) {
   uint32_t next = 0;
-  assert(journal.next_counter(1, &next));
+  assert(journal.next_counter(1, &next, true));
   return next;
 }
 
@@ -532,6 +571,7 @@ static void check_pair_sequence_and_gap() {
   f.runtime.set_enabled(true, true);
   // Arrange for the TWO reservations to make maintenance due, then prove
   // neither the copies nor the inter-stage gap run that maintenance.
+  f.prepare_candidate();
   Reservation reserved;
   while (durable_image(f.flash).sequence < PAIRS_PER_BANK - MAINTAIN_BELOW - 1)
     assert(f.journal.reserve(2, 1, false, &reserved) == Status::ok);
@@ -566,10 +606,12 @@ static void check_pair_sequence_and_gap() {
     const auto& first = f.radio.frames[i < 3 ? 0 : 3];
     assert(frame.body.length == (i < 3 ? 12 : 13));
     assert(frame.parsed.counter == (i < 3 ? 0 : 1));
-    assert(frame.parsed.identity == 0x186054);
+    assert(frame.parsed.identity == f.hooks.reservations[0].identity);
     assert(frame.programs == programs && frame.chip_ns == 208500);
     assert(!memcmp(frame.body.bytes, first.body.bytes, frame.body.length));
   }
+  assert(f.journal.confirm_candidate(1) == Status::ok);
+  f.settle(2301);
   assert(f.submit(2, 1, Action::open, 2301));
   f.drain(2301);
   assert(f.radio.frames.back().parsed.counter == 2 && f.hooks.phases.back() == 0);
@@ -614,11 +656,13 @@ static void check_pair_cancellation() {
                                   cause == 2 ? "session_disconnected" : "deadline_expired"));
       assert(event.completed_copies == (stage == 0 ? 1 : stage == 1 ? 3 : 4));
       assert(f.hooks.reservations.size() == 2);
-      assert(f.flash.programs() == programs && f.flash.erases() == erases);
+      // Completion can perform idle bank maintenance on this same tick.
+      // It must not consume another candidate counter or start/replay RF.
+      assert(next_counter(f.journal) == 2);
       if (stage == 1 && cause < 2) f.runtime.disconnect();
       for (uint32_t later : {6011u, 7000u, 9000u}) f.tick(later);
       assert(f.radio.bursts.size() == bursts);  // no second stage or replay
-      assert(f.flash.programs() == programs && f.flash.erases() == erases);
+      assert(next_counter(f.journal) == 2);
       Journal rebooted(f.flash);
       assert(rebooted.open() == StorageState::ready && next_counter(rebooted) == 2);
     }
@@ -643,8 +687,8 @@ static void check_pair_stop_dispatch() {
       assert(!strcmp(f.hooks.event(1).outcome, "cancelled"));
       assert(f.hooks.event(1).completed_copies == (stage == 0 ? 1 : stage == 1 ? 3 : 4));
       assert(f.radio.frames.back().parsed.action == 0x04);
-      assert(f.radio.frames.back().parsed.counter == (target == 1 ? 2 : 700));
-      assert(f.hooks.reservations.size() == 3 && f.flash.programs() == programs + 2);
+      assert(f.radio.frames.back().parsed.counter == (target == 1 ? 0 : 700));
+      assert(f.hooks.reservations.size() == 3 && f.flash.programs() == programs + RECORD_BYTES / PAGE_BYTES);
       f.drain(now + 2);
       assert(!strcmp(f.hooks.event(2).outcome, "emitted"));
       const size_t bursts = f.radio.bursts.size();
@@ -697,7 +741,9 @@ static void check_pair_deadlines_and_profiles() {
   finish_stage(calibrated, 4500);
   assert(!strcmp(calibrated.hooks.event(1).outcome, "emitted"));
   assert(calibrated.hooks.event(1).completed_copies == 64);
+  assert(calibrated.journal.confirm_candidate(1) == Status::ok);
   calibrated.hooks.second_start_ms = 0;  // ignored for normal commands
+  calibrated.settle(4501);
   assert(calibrated.submit(2, 1, Action::open, 4501));
   calibrated.drain(4501);
   assert(!strcmp(calibrated.hooks.event(2).outcome, "emitted"));
@@ -716,7 +762,10 @@ static void check_pair_deadlines_and_profiles() {
     overlap.runtime.set_enabled(true, true);
     radio::Body body;
     radio::Waveform wave;
-    assert(radio::make_enrollment_body(0x186054, 0, 0, &body));
+    overlap.prepare_candidate();
+    uint32_t identity = 0;
+    assert(overlap.journal.identity(1, &identity, true));
+    assert(radio::make_enrollment_body(identity, 0, 0, &body));
     assert(radio::encode_burst(body, overlap.hooks.copies, &wave));
     overlap.hooks.chip_ns = 1000000;
     overlap.hooks.second_start_ms = wave.chips() + duration_delta;
@@ -759,8 +808,11 @@ static void check_movement_gets_its_full_burst_after_queueing() {
 static void check_pair_reservation_cuts_and_faults() {
   // Second reservation: before body, intact torn body, before/during commit.
   // The first counter is always burnt; the second burns iff its body is intact.
-  for (const auto &cut : {std::pair<unsigned, unsigned>{2, 0}, {2, PAGE_BYTES},
-                         {3, 0}, {3, PAGE_BYTES / 2}}) {
+  for (const auto &cut : {
+      std::pair<unsigned, unsigned>{RECORD_BYTES / PAGE_BYTES, 0},
+      {RECORD_BYTES / PAGE_BYTES + BODY_BYTES / PAGE_BYTES - 1, PAGE_BYTES},
+      {RECORD_BYTES / PAGE_BYTES + BODY_BYTES / PAGE_BYTES, 0},
+      {RECORD_BYTES / PAGE_BYTES + BODY_BYTES / PAGE_BYTES, PAGE_BYTES / 2}}) {
     Fixture f(true, 0);
     f.runtime.set_enabled(true, true);
     assert(f.submit(1, 1, Action::none, 10, true));
@@ -774,17 +826,25 @@ static void check_pair_reservation_cuts_and_faults() {
     f.flash.restore_power();
     Journal recovered(f.flash);
     assert(recovered.open() == StorageState::ready);
-    const uint32_t next = cut.first == 2 && cut.second == 0 ? 1 : 2;
+    const uint32_t next = cut.first == RECORD_BYTES / PAGE_BYTES && cut.second == 0 ? 1 : 2;
     assert(next_counter(recovered) == next);
     assert(!f.submit(3, 1, Action::stop));  // old runtime cannot resume after fault
     assert(f.radio.bursts.empty());
   }
+  // A candidate can consume only the two reservations of its durable
+  // attempt. Re-enqueueing cannot open another pair without a retry claim.
   Fixture exhausted(true, 0xfffe);
   exhausted.runtime.set_enabled(true, true);
+  exhausted.prepare_candidate();
+  Reservation consumed;
+  for (unsigned i = 0; i < 2; ++i)
+    assert(exhausted.journal.reserve(1, 0, false, &consumed,
+        exhausted.journal.incarnation(1, true), true) == Status::ok);
+  while (exhausted.journal.maintenance_due()) assert(exhausted.journal.maintain() == Status::ok);
   assert(exhausted.submit(1, 1, Action::none, 10, true));
   exhausted.drain();
-  assert(!strcmp(exhausted.hooks.event(1).error, "counter_exhausted"));
-  assert(next_counter(exhausted.journal) == 0xffff);
+  assert(exhausted.hooks.event(1).storage_status == Status::no_attempt);
+  assert(next_counter(exhausted.journal) == 2);
   assert(exhausted.radio.bursts.empty() && exhausted.hooks.reservations.empty());
 
   for (uint8_t phase = 0; phase < 2; ++phase) {
@@ -813,12 +873,100 @@ static void check_pair_reservation_cuts_and_faults() {
       assert(event.completed_copies == (phase ? 3 : 0) + (start_failure ? 0 : 1));
       assert(f.radio.ends == unsigned(start_failure ? phase : phase + 1));
       assert(next_counter(f.journal) == 2 && f.hooks.reservations.size() == 2);
-      const uint32_t programs = f.flash.programs();
       const size_t bursts = f.radio.bursts.size();
       for (uint32_t now : {3000u, 6000u, 9000u}) f.tick(now);
-      assert(f.radio.bursts.size() == bursts && f.flash.programs() == programs);
+      assert(f.radio.bursts.size() == bursts && next_counter(f.journal) == 2);
     }
   }
+}
+
+static void check_incarnation_fences_and_slot_reuse() {
+  Fixture f;
+  const auto old = f.journal.shutter(1);
+  assert(!f.runtime.submit({90,0,1,Action::open,false,0},10));
+  assert(!strcmp(f.hooks.event(90).error, "invalid_request"));
+  assert(f.submit(1,1,Action::open));
+  // Exercise the lower-level runtime fence independently of the controller's
+  // busy admission: trusted journal calls retire and reuse a queued slot.
+  assert(f.journal.set_service(1,false) == Status::ok);
+  assert(f.journal.retire(1) == Status::ok);
+  assert(f.journal.allocate_candidate(1,false) == Status::ok);
+  assert(f.journal.claim_attempt(1,false) == Status::ok);
+  Reservation reservation;
+  const auto epoch = f.journal.incarnation(1,true);
+  for (unsigned i=0; i<2; ++i)
+    assert(f.journal.reserve(1,0,false,&reservation,epoch,true) == Status::ok);
+  assert(f.journal.confirm_candidate(1) == Status::ok);
+  assert(f.journal.shutter(1).logical_id != old.logical_id);
+  while (f.journal.maintenance_due()) assert(f.journal.maintain() == Status::ok);
+  const auto writes = f.flash.programs();
+  f.tick(10);
+  assert(f.radio.bursts.empty() && f.flash.programs() == writes);
+  assert(f.hooks.event(1).job.incarnation == old.incarnation);
+  assert(!strcmp(f.hooks.event(1).error,"stale_incarnation"));
+  assert(!f.runtime.submit({2,0,1,Action::open,false,old.incarnation},11));
+  assert(!strcmp(f.hooks.event(2).error,"stale_incarnation"));
+  assert(f.submit(3,1,Action::open,12));
+  f.drain(12);
+  assert(f.hooks.event(3).job.incarnation == epoch);
+  assert(f.radio.frames.back().parsed.counter == 2);
+}
+
+static void check_candidate_replacement_during_gap() {
+  Fixture f(true,0);
+  f.runtime.set_enabled(true,true);
+  assert(f.submit(1,1,Action::none,10,true));
+  f.tick(10);
+  finish_stage(f,500);
+  const auto old = f.journal.incarnation(1,true);
+  assert(f.journal.cancel_candidate(1) == Status::ok);
+  assert(f.journal.allocate_candidate(1,true) == Status::ok);
+  assert(f.journal.claim_attempt(1,false) == Status::ok);
+  const auto fresh = f.journal.incarnation(1,true);
+  assert(old != fresh);
+  f.tick(2011);
+  assert(!f.runtime.active() && f.radio.bursts.size() == 1);
+  assert(!strcmp(f.hooks.event(1).error,"stale_incarnation"));
+  assert(f.hooks.event(1).job.incarnation == old && next_counter(f.journal) == 0);
+  while (f.journal.maintenance_due()) assert(f.journal.maintain() == Status::ok);
+  assert(f.submit(2,1,Action::none,2200,true));
+  f.drain(2200);
+  assert(f.hooks.event(2).job.incarnation == fresh && next_counter(f.journal) == 2);
+}
+
+static void check_suspended_gap_never_starts_burst() {
+  Fixture f(true, 0);
+  f.runtime.set_enabled(true, true);
+  assert(f.submit(1, 1, Action::none, 10, true));
+  f.tick(10);
+  finish_stage(f, 500);
+  const auto programs = f.flash.programs(), erases = f.flash.erases();
+  f.radio.now = 2011;
+  f.runtime.tick(2011, false);
+  assert(f.runtime.active() && !f.radio.running && f.radio.bursts.size() == 1);
+  assert(f.flash.programs() == programs && f.flash.erases() == erases);
+  f.tick(2012);
+  assert(f.radio.bursts.size() == 2);
+  f.drain(2013);
+  assert(!strcmp(f.hooks.event(1).outcome, "emitted"));
+}
+
+static void check_pause_drain_never_maintains() {
+  Fixture f;
+  f.due();
+  assert(f.submit(1,1,Action::stop));
+  f.tick(10);
+  f.runtime.disconnect();
+  const auto programs = f.flash.programs(), erases = f.flash.erases();
+  f.radio.done = true;
+  f.radio.now = 11;
+  f.runtime.tick(11,false);
+  assert(!f.runtime.active());
+  for (uint32_t now : {12u,13u,14u}) f.runtime.tick(now,false);
+  assert(f.flash.programs() == programs && f.flash.erases() == erases);
+  assert(f.journal.maintenance_due());
+  f.tick(15);
+  assert(f.flash.programs() > programs || f.flash.erases() > erases);
 }
 
 int main() {
@@ -828,6 +976,10 @@ int main() {
   check_expiry_disconnect_and_recovery();
   check_gates_builders_and_faults();
   check_overflow_and_critical_counter();
+  check_incarnation_fences_and_slot_reuse();
+  check_candidate_replacement_during_gap();
+  check_pause_drain_never_maintains();
+  check_suspended_gap_never_starts_burst();
   check_pair_sequence_and_gap();
   check_pair_cancellation();
   check_pair_stop_dispatch();
